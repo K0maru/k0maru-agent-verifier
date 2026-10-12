@@ -109,6 +109,9 @@
             "unauthorized_files": {
               "type": "array",
               "items": { "type": "string" }
+            },
+            "message": {
+              "type": "string"
             }
           }
         }

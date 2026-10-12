@@ -177,6 +177,7 @@ pub fn evaluate_scope(
             status: StepStatus::Passed,
             modified_files: all_modified,
             unauthorized_files: Vec::new(),
+            message: None,
         };
     }
 
@@ -201,6 +202,7 @@ pub fn evaluate_scope(
         status,
         modified_files: all_modified,
         unauthorized_files,
+        message: None,
     }
 }
 
@@ -266,6 +268,194 @@ pub async fn collect_modified_files(workspace: &Path) -> Result<Vec<String>, Ver
     Ok(files.into_iter().collect())
 }
 
+/// Determines if a normalized relative file path matches common automated test patterns.
+pub fn is_test_file(path: &str) -> bool {
+    let normalized = normalize_path(path);
+    let trimmed = normalized.as_str();
+
+    if trimmed.starts_with("tests/")
+        || trimmed == "tests"
+        || trimmed.starts_with("test/")
+        || trimmed == "test"
+        || trimmed.starts_with("__tests__/")
+        || trimmed == "__tests__"
+    {
+        return true;
+    }
+
+    if let Some(file_name) = trimmed.rsplit('/').next() {
+        if file_name.starts_with("test_")
+            || file_name.ends_with("_test.rs")
+            || file_name.ends_with("_test.py")
+            || file_name.ends_with("_test.go")
+            || file_name.ends_with(".test.js")
+            || file_name.ends_with(".spec.js")
+            || file_name.ends_with(".test.jsx")
+            || file_name.ends_with(".spec.jsx")
+            || file_name.ends_with(".test.ts")
+            || file_name.ends_with(".spec.ts")
+            || file_name.ends_with(".test.tsx")
+            || file_name.ends_with(".spec.tsx")
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Scans unified git diff text for line deletions in baseline test files.
+pub fn detect_deletions_in_diff(diff: &str, baseline_tests: &BTreeSet<String>) -> Vec<String> {
+    let mut tampered = BTreeSet::new();
+    let mut current_file: Option<String> = None;
+    let mut is_baseline_test = false;
+
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git a/") {
+            if let Some((old_path, _)) = rest.split_once(" b/") {
+                let norm = normalize_path(old_path);
+                is_baseline_test = baseline_tests.contains(&norm) || is_test_file(&norm);
+                current_file = Some(norm);
+            } else {
+                current_file = None;
+                is_baseline_test = false;
+            }
+            continue;
+        }
+
+        if !is_baseline_test {
+            continue;
+        }
+
+        // Check for deleted file mode
+        if line.starts_with("deleted file mode") {
+            if let Some(ref file) = current_file {
+                tampered.insert(file.clone());
+            }
+            continue;
+        }
+
+        // Check for deleted line: starts with '-' but NOT '---'
+        if line.starts_with('-') && !line.starts_with("---") {
+            if let Some(ref file) = current_file {
+                tampered.insert(file.clone());
+            }
+        }
+    }
+
+    tampered.into_iter().collect()
+}
+
+/// Resolves the effective git baseline branch for test protection.
+pub async fn resolve_baseline_branch(
+    workspace: &Path,
+    explicit_branch: Option<&str>,
+    immutable_tests: bool,
+) -> Result<Option<String>, VerifierError> {
+    if let Some(b) = explicit_branch {
+        let trimmed = b.trim();
+        if !trimmed.is_empty() {
+            let status = Command::new("git")
+                .args(["rev-parse", "--verify", trimmed])
+                .current_dir(workspace)
+                .output()
+                .await;
+            match status {
+                Ok(out) if out.status.success() => return Ok(Some(trimmed.to_string())),
+                _ => {
+                    return Err(VerifierError::GitError(format!(
+                        "Specified base branch '{trimmed}' does not exist in git repository"
+                    )));
+                }
+            }
+        }
+    }
+
+    if immutable_tests {
+        for branch in [
+            crate::constants::DEFAULT_BASE_BRANCH_MAIN,
+            crate::constants::DEFAULT_BASE_BRANCH_DEV,
+        ] {
+            if let Ok(out) = Command::new("git")
+                .args(["rev-parse", "--verify", branch])
+                .current_dir(workspace)
+                .output()
+                .await
+            {
+                if out.status.success() {
+                    return Ok(Some(branch.to_string()));
+                }
+            }
+        }
+
+        if let Ok(out) = Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD~1"])
+            .current_dir(workspace)
+            .output()
+            .await
+        {
+            if out.status.success() {
+                return Ok(Some("HEAD~1".to_string()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Inspects git history against `base_branch` to detect if any lines were deleted from existing tests.
+pub async fn check_test_baseline_deletions(
+    workspace: &Path,
+    base_branch: &str,
+) -> Result<Vec<String>, VerifierError> {
+    // 1. Query files tracked in base_branch that are test files
+    let ls_output = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", base_branch])
+        .current_dir(workspace)
+        .output()
+        .await
+        .map_err(|e| {
+            VerifierError::ProcessError(format!("Failed to execute 'git ls-tree': {e}"))
+        })?;
+
+    if !ls_output.status.success() {
+        let err = String::from_utf8_lossy(&ls_output.stderr);
+        return Err(VerifierError::GitError(format!(
+            "Failed to list tree for base branch '{base_branch}': {err}"
+        )));
+    }
+
+    let ls_text = String::from_utf8_lossy(&ls_output.stdout);
+    let baseline_test_files: BTreeSet<String> = ls_text
+        .lines()
+        .map(normalize_path)
+        .filter(|p| !p.is_empty() && is_test_file(p))
+        .collect();
+
+    if baseline_test_files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 2. Query diff between workspace (working tree + index) and base_branch
+    let diff_output = Command::new("git")
+        .args(["diff", "-U0", base_branch])
+        .current_dir(workspace)
+        .output()
+        .await
+        .map_err(|e| VerifierError::ProcessError(format!("Failed to execute 'git diff': {e}")))?;
+
+    if !diff_output.status.success() {
+        let err = String::from_utf8_lossy(&diff_output.stderr);
+        return Err(VerifierError::GitError(format!(
+            "Failed to compute diff against base branch '{base_branch}': {err}"
+        )));
+    }
+
+    let diff_text = String::from_utf8_lossy(&diff_output.stdout);
+    let tampered = detect_deletions_in_diff(&diff_text, &baseline_test_files);
+    Ok(tampered)
+}
+
 /// Scope guard engine enforcing file change blast radius constraints.
 pub struct ScopeGuard;
 
@@ -275,8 +465,34 @@ impl ScopeGuard {
         workspace: &Path,
         allowed_whitelist: Option<&[String]>,
     ) -> Result<ScopeGuardCheck, VerifierError> {
+        Self::check_scope_extended(workspace, allowed_whitelist, None, false).await
+    }
+
+    /// Extended scope check supporting whitelist and immutable test baseline verification.
+    pub async fn check_scope_extended(
+        workspace: &Path,
+        allowed_whitelist: Option<&[String]>,
+        base_branch: Option<&str>,
+        immutable_tests: bool,
+    ) -> Result<ScopeGuardCheck, VerifierError> {
         let modified = collect_modified_files(workspace).await?;
-        Ok(evaluate_scope(&modified, allowed_whitelist))
+        let mut check = evaluate_scope(&modified, allowed_whitelist);
+
+        if let Some(branch) =
+            resolve_baseline_branch(workspace, base_branch, immutable_tests).await?
+        {
+            let tampered = check_test_baseline_deletions(workspace, &branch).await?;
+            if !tampered.is_empty() {
+                check.status = StepStatus::Failed;
+                check.message = Some(format!(
+                    "{}: {}",
+                    crate::constants::ANTI_TAMPERING_VIOLATION_MESSAGE,
+                    tampered.join(", ")
+                ));
+            }
+        }
+
+        Ok(check)
     }
 }
 
@@ -485,5 +701,83 @@ mod tests {
                 .expect("check_scope");
         assert_eq!(check2.status, StepStatus::Passed);
         assert!(check2.unauthorized_files.is_empty());
+    }
+
+    #[test]
+    fn test_is_test_file_patterns() {
+        assert!(is_test_file("tests/foo.rs"));
+        assert!(is_test_file("./tests/nested/bar.rs"));
+        assert!(is_test_file("tests\\foo.rs"));
+        assert!(is_test_file("src/foo_test.rs"));
+        assert!(is_test_file("src/test_foo.rs"));
+        assert!(is_test_file("tests/test_foo.py"));
+        assert!(is_test_file("tests/foo_test.py"));
+        assert!(is_test_file("__tests__/foo.test.ts"));
+        assert!(is_test_file("src/components/button.spec.js"));
+        assert!(is_test_file("test/foo.go"));
+        assert!(is_test_file("pkg/math_test.go"));
+
+        assert!(!is_test_file("src/lib.rs"));
+        assert!(!is_test_file("src/main.rs"));
+        assert!(!is_test_file("Cargo.toml"));
+        assert!(!is_test_file("README.md"));
+        assert!(!is_test_file("testing_framework/core.rs"));
+    }
+
+    #[test]
+    fn test_detect_deletions_in_diff_logic() {
+        let mut baseline_tests = BTreeSet::new();
+        baseline_tests.insert("tests/test_math.rs".to_string());
+        baseline_tests.insert("tests/test_auth.rs".to_string());
+
+        // Case 1: Pure additions to test file -> no tampering
+        let diff_pure_additions = r#"
+diff --git a/tests/test_math.rs b/tests/test_math.rs
+--- a/tests/test_math.rs
++++ b/tests/test_math.rs
+@@ -10,0 +10,5 @@
++#[test]
++fn test_sub() {
++    assert_eq!(1, 1);
++}
+"#;
+        let tampered = detect_deletions_in_diff(diff_pure_additions, &baseline_tests);
+        assert!(tampered.is_empty());
+
+        // Case 2: Line deleted in baseline test file -> tampered!
+        let diff_with_deletion = r#"
+diff --git a/tests/test_auth.rs b/tests/test_auth.rs
+--- a/tests/test_auth.rs
++++ b/tests/test_auth.rs
+@@ -5,2 +5,1 @@
+-    assert!(complex_invariant());
+     assert!(true);
+"#;
+        let tampered2 = detect_deletions_in_diff(diff_with_deletion, &baseline_tests);
+        assert_eq!(tampered2, vec!["tests/test_auth.rs"]);
+
+        // Case 3: File deleted completely -> tampered!
+        let diff_deleted_file = r#"
+diff --git a/tests/test_math.rs b/tests/test_math.rs
+deleted file mode 100644
+--- a/tests/test_math.rs
++++ /dev/null
+@@ -1,5 +0,0 @@
+-test
+"#;
+        let tampered3 = detect_deletions_in_diff(diff_deleted_file, &baseline_tests);
+        assert_eq!(tampered3, vec!["tests/test_math.rs"]);
+
+        // Case 4: Deletion in non-test file (src/lib.rs) -> ignored by test baseline guard
+        let diff_src_deletion = r#"
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,2 +1,1 @@
+-pub fn old() {}
+ pub fn new() {}
+"#;
+        let tampered4 = detect_deletions_in_diff(diff_src_deletion, &baseline_tests);
+        assert!(tampered4.is_empty());
     }
 }

@@ -122,3 +122,137 @@ fn test_cli_receipt_out_flag() {
         serde_json::from_str(&content).expect("receipt file must be valid JSON");
     assert_eq!(receipt["task_id"], "test-out-flag");
 }
+
+fn setup_temp_cargo_workspace() -> TempDir {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git execution");
+        assert!(output.status.success());
+    };
+
+    run_git(&["init"]);
+    run_git(&["config", "user.name", "Tester"]);
+    run_git(&["config", "user.email", "tester@example.com"]);
+    std::fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "dummy_cli"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/lib.rs"), "pub fn ok() -> bool { true }\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "init cargo"]);
+    temp
+}
+
+#[test]
+fn test_cli_default_receipt_emission_when_out_omitted() {
+    let temp_ws = setup_temp_cargo_workspace();
+    let temp_receipts_dir = TempDir::new().unwrap();
+
+    let mut cmd = Command::cargo_bin("k0maru-verifier").unwrap();
+    cmd.env("K0MARU_RECEIPT_DIR", temp_receipts_dir.path())
+        .args([
+            "verify",
+            "--workspace",
+            temp_ws.path().to_str().unwrap(),
+            "--task-id",
+            "task-auto-store-007",
+            "--json",
+        ])
+        .assert()
+        .code(0);
+
+    let expected_receipt_file = temp_receipts_dir.path().join("task-auto-store-007.json");
+    assert!(
+        expected_receipt_file.is_file(),
+        "Receipt file must automatically be written to standard receipt store when --out is omitted"
+    );
+
+    let content =
+        std::fs::read_to_string(&expected_receipt_file).expect("read auto-stored receipt");
+    let receipt: serde_json::Value = serde_json::from_str(&content).expect("valid JSON receipt");
+    assert_eq!(receipt["task_id"], "task-auto-store-007");
+    assert_eq!(receipt["verdict"], "success");
+}
+
+#[test]
+fn test_cli_immutable_tests_anti_tampering_blocks_execution() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git execution");
+        assert!(output.status.success());
+    };
+
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.name", "Tester"]);
+    run_git(&["config", "user.email", "tester@example.com"]);
+
+    // Create Cargo.toml and baseline test
+    std::fs::write(
+        root.join("Cargo.toml"),
+        r#"[package]
+name = "dummy"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("tests/baseline_test.rs"),
+        "#[test]\nfn test_baseline() {\n    assert_eq!(dummy::add(1, 1), 2);\n    assert_ne!(1, 2);\n}\n",
+    )
+    .unwrap();
+
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "baseline with test assertions"]);
+
+    // Create feature branch and tamper with existing test (delete assertion)
+    run_git(&["checkout", "-b", "feat/tamper"]);
+    std::fs::write(
+        root.join("tests/baseline_test.rs"),
+        "#[test]\nfn test_baseline() {\n    assert_eq!(dummy::add(1, 1), 2);\n}\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("k0maru-verifier").unwrap();
+    cmd.args([
+        "verify",
+        "--workspace",
+        root.to_str().unwrap(),
+        "--task-id",
+        "task-tamper-check",
+        "--base-branch",
+        "main",
+        "--immutable-tests",
+    ])
+    .assert()
+    .code(1) // EXIT_VERIFICATION_FAILED
+    .stdout(predicate::str::contains(
+        "Anti-tampering violation: deletions detected in existing test baseline",
+    ));
+}
