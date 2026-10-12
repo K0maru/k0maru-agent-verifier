@@ -2,150 +2,241 @@
 
 [English](README.md) | [简体中文](README_CN.md)
 
-> **Deterministic Test Oracle, Scope Guard & Cryptographic Execution Receipt Signer for AI Agents**  
-> The 4th modular cornerstone of the **K0maru-Harness** matrix (alongside `k0maru-agent-memory`, `k0maru-agent-router`, and `k0maru-agent-workspace`).
+> **Deterministic Test Oracle, Anti-Tampering Scope Guard & Cryptographic Execution Receipt Signer for AI Agents**  
+> The 4th modular cornerstone of the **K0maru-Harness** architecture (alongside `k0maru-agent-memory`, `k0maru-agent-router`, and `k0maru-agent-workspace`).
 
 ---
 
 ## 🎯 Overview
 
-In autonomous multi-agent coding harnesses, verbal claims from LLMs ("I fixed the bug and all tests passed!") are fundamentally untrustworthy without physical verification. 
+In autonomous multi-agent software engineering, conversational assurances from LLMs (*"I resolved the issue and verified all tests pass"*) are fundamentally untrustworthy without physical verification. AI agents frequently hallucinate passing states, omit edge-case runs, or quietly delete failing test assertions to fabricate green outcomes.
 
-**K0maru Agent Verifier** provides an objective, zero-hallucination, deterministic test oracle and execution gatekeeper:
-1. **Physical Facts Only**: Intercepts real process exit codes (`cargo test`, `pytest`, `npm test` == 0), compiler errors, and linter warnings.
-2. **Anti-Corruption Scope Guard**: Strictly enforces modification boundaries against an authorized whitelist (`allowed_files`), rejecting out-of-scope tampering or rogue edits.
-3. **Signed Execution Receipt**: Computes cryptographic SHA-256 fingerprints of git patches and outputs tamper-evident `agent-receipt-v1.json` receipts.
-4. **Double-Gate Architecture**: Acts as the deterministic **Hard Physical Gate** before passing code to soft semantic audit (`code-review` / `tuicr`), eliminating 90%+ wasted review tokens.
+**K0maru Agent Verifier** acts as an objective, zero-hallucination, deterministic test oracle and execution gatekeeper:
+
+1. **Physical OS Ground Truth Only**: Never trusts prompts or synthetic mocks. Directly intercepts real OS process exit codes (`cargo test`, `pytest`, `npm test` == 0), compiler diagnostics, and linter warnings.
+2. **Anti-Tampering Scope Guard**: Enforces strict modification boundaries against declared whitelists (`allowed_files`) and prevents test baseline tampering (blocking deletion of existing tests).
+3. **Cryptographic Execution Receipts (`agent-receipt-v1.json`)**: Computes git diff patch SHA-256 fingerprints, RFC3339 timestamps, and execution metrics into tamper-evident receipts.
+4. **Auto-Persistence to Global Receipt Bus**: Automatically archives signed receipts to `~/.k0maru/receipts/<task_id>.json` (respecting `$K0MARU_RECEIPT_DIR`).
+5. **Two-Gate Synergy (ReviewPack)**: Serves as **Gate 1 (Deterministic Physical Hard Gate)** before dispatching to **Gate 2 (Semantic Code Review & Human Decision Gate)** via `ReviewPack`, eliminating over 90% of wasted review tokens on broken builds.
+
+---
+
+## 🏛️ Two-Gate Architecture & Review Synergy
 
 ```mermaid
 flowchart TD
-    Sandbox["📦 Worktree Sandbox<br/>(Agent Code Changes)"] --> Verifier
+    Sandbox["📦 Worktree Sandbox<br/>(Agent Code Changes)"] --> Gate1
 
-    subgraph Verifier ["⚖️ K0maru Agent Verifier (Deterministic Hard Gate)"]
-        V_Compile["[1] Compiler / Type Check (cargo check / tsc)"]
+    subgraph Gate1 ["⚖️ Gate 1: Deterministic Physical Hard Gate (k0maru-verifier)"]
+        V_Compile["[1] Compilation Check (cargo check / tsc)"]
         V_Test["[2] Test Suite Run (cargo test / pytest)"]
         V_Lint["[3] Static Linter (clippy / eslint)"]
-        V_Scope["[4] Scope Guard (git diff vs allowed_files)"]
+        V_Scope["[4] Scope Guard & Anti-Tampering (git diff vs whitelist)"]
+        V_Sign["[5] Receipt Signing (Git Patch SHA-256)"]
+        V_Persist["[6] Bus Persistence (~/.k0maru/receipts/<task_id>.json)"]
+
+        V_Compile --> V_Test --> V_Lint --> V_Scope --> V_Sign --> V_Persist
     end
 
-    Verifier -- "❌ Exit Code != 0 / Scope Violation" --> Reject["🛑 Fast Rejection Receipt<br/>(Zero Token Waste, Auto-Rollback)"]
-    Verifier -- "✅ 100% Green Physical Gate" --> Pass["📜 Cryptographic agent-receipt-v1.json<br/>(Git Patch SHA-256 Signed)"]
+    Gate1 -- "❌ Non-zero Exit / Tampering / Out-of-Scope" --> Rejection["🛑 Fast Physical Rejection<br/>(Exit Code 1/2, Zero Token Waste)"]
+    Gate1 -- "✅ 100% Green Hard Gate" --> RP["📦 ReviewPack Payload<br/>(Receipt + Diff Stat + Markdown Summary)"]
 
-    Pass --> Downstream["下游: Router Ingest ➔ Workspace Auto-Merge / Code-Review"]
+    subgraph Gate2 ["🔍 Gate 2: Semantic Review & Decision Gate"]
+        Review["code-review / tuicr AI Reading Guide"]
+        Gate["Human Tech Lead Decision Gate"]
+        Review --> Gate
+    end
+
+    RP --> Gate2
+    Gate -->|"Approved"| Merge["🚀 k0maru-agent-workspace Auto-Merge / PR"]
 ```
 
 ---
 
-## ✨ Key Features
+## 🧭 Milestone Delivery Highlights
 
-- ⚡ **Pluggable Multi-Language Runner SPI**: Automatic detection and execution for:
-  - **Rust**: `cargo check`, `cargo test`, `cargo clippy --all-targets -- -D warnings`
-  - **Python**: `python -m pytest` with structured failure summary
-  - **Node.js**: `npm test` / `npm run lint`
-- 🛡️ **Scope Guard & Boundary Defense**:
-  - Matches modified and newly created files against task-level whitelists (supports exact paths, directory prefixes, and glob wildcards like `src/**`, `tests/*`).
-  - Distinguishes untracked files vs staged/unstaged changes via `git status --porcelain`.
-- 🔐 **Cryptographic Receipt Protocol (`agent-receipt-v1.json`)**:
-  - Signs every verification step (`compilation`, `tests`, `linter`, `scope_guard`).
-  - SHA-256 digest of `git diff` patch ensures downstream consumers can verify the exact code state that was tested.
-- 🚀 **Zero-Overhead CLI & Library**:
-  - Clean Unix-style exit codes: `0` (Success), `1` (Verification Failed), `2` (Fatal Execution Error).
-  - Human-friendly CLI output or machine-parsable `--json` stream.
+| Phase | Milestone | Capabilities Delivered |
+| :--- | :--- | :--- |
+| **Phase 1** | **Deterministic Baseline & Physical Invariants** | Pluggable Multi-Language Runner SPI (Rust, Python, Node.js), process exit code interception, Scope Guard (`git diff HEAD` + `git status --porcelain`), cryptographic receipt signing (`agent-receipt-v1.json` with Git Patch SHA-256). |
+| **Phase 2** | **Differential Baseline & Failure Classification** | Immutable Test Baseline Guard (`--base-branch`, `--immutable-tests`), anti-tampering deletion gate, typed exit codes (`EXIT_SUCCESS=0`, `EXIT_VERIFICATION_FAILED=1`, `EXIT_FATAL_ERROR=2`), auto-persistence to standard receipt bus (`resolve_receipts_dir(None)`). |
+| **Phase 3** | **Review Synergy & ReviewPack Payload** | Consolidated `ReviewPack` generation (`--review-pack`, `review-pack` subcommand), concise Markdown executive summary (<20 lines) for `code-review` / `tuicr`, machine-readable `--json` ReviewPack payload, flattened CLI hierarchy. |
 
 ---
 
-## 🚀 Quick Start (CLI)
+## 🚀 CLI Hierarchy & Usage
 
-### 1. Build and Install
+`k0maru-verifier` provides a flattened CLI hierarchy supporting direct root execution without mandatory subcommands, as well as dedicated operational subcommands.
 
-```bash
-cargo build --release
-# Binary available at target/release/k0maru-verifier
-```
+### 1. Root Execution (Zero-Subcommand Flattened)
 
-### 2. Verify a Workspace In-Place
+Execute verification directly against any target workspace:
 
 ```bash
 # Verify current workspace with auto-detected runner
-k0maru-verifier verify --workspace . --task-id task_auth_01
+k0maru-verifier --task-id task_auth_01
 
-# Output signed receipt to JSON file with file whitelist
-k0maru-verifier verify \
+# Verify isolated workspace with file whitelist and JSON output
+k0maru-verifier \
   --workspace /path/to/sandbox \
   --task-id task_auth_01 \
-  --whitelist "src/auth.rs,tests/auth_test.rs" \
-  --out /path/to/receipt.json \
+  --whitelist "src/auth/**,tests/auth_test.rs" \
   --json
 ```
 
-### 3. Verify Using a Declarative Spec File
+### 2. Available Subcommands
+
+| Subcommand | Alias | Description | Example |
+| :--- | :--- | :--- | :--- |
+| `verify` | `run` | Default verification pipeline. Runs compilation, tests, linter, and scope guard. | `k0maru-verifier run --workspace .` |
+| `review-pack` | — | Executes verification and produces a `ReviewPack` markdown summary or JSON payload. | `k0maru-verifier review-pack --task-id task_01` |
+| `baseline` | — | Enforces immutable test baseline protection against deletions relative to a base branch. | `k0maru-verifier baseline --base-branch main` |
+| `diff` | — | Focuses on scope guard whitelist matching and diff statistics. | `k0maru-verifier diff --whitelist "src/**"` |
+
+### 3. ReviewPack Generation (Phase 3)
+
+When passing `--review-pack` or invoking the `review-pack` subcommand:
+- **On Success**: Outputs a consolidated Markdown executive summary (or machine-readable `ReviewPack` JSON with `--json`), ready for instant insertion into `code-review` or `tuicr` notes.
+- **On Failure**: Emits standard failure diagnostics and exits with code `1` or `2`.
+- **Receipt Persistence**: Automatically signs and saves the execution receipt to the receipt store.
 
 ```bash
-k0maru-verifier verify --spec task_spec.json --json
+# Generate Markdown summary for terminal review
+k0maru-verifier review-pack --workspace . --task-id task_feature_01
+
+# Output machine-readable JSON payload for automated pipelines
+k0maru-verifier --review-pack --json --workspace . --task-id task_feature_01
 ```
 
-Example `task_spec.json`:
-```json
-{
-  "task_id": "task_demo_01",
-  "workspace": "./my-project",
-  "runner": "cargo",
-  "whitelist": ["src/**", "tests/**"]
-}
+### 4. Immutable Test Baseline Guard (Anti-Tampering)
+
+Prevents agents from bypassing difficult tests by deleting assertion lines or test files:
+
+```bash
+k0maru-verifier --base-branch main --immutable-tests --task-id task_bugfix_42
+```
+*If any lines or files were deleted from existing baseline tests, verification is immediately rejected with:*
+```
+⚠️  Scope Guard message: Anti-tampering violation: deletions detected in existing test baseline
+```
+
+### 5. CLI Options Reference
+
+```text
+Usage: k0maru-verifier [OPTIONS] [COMMAND]
+
+Commands:
+  verify       Verify workspace quality gates and produce an execution receipt (alias: run)
+  review-pack  Verify workspace quality gates and generate a ReviewPack for review integration
+  baseline     Verify workspace quality gates enforcing immutable test baseline protection
+  diff         Verify workspace quality gates with scope guard and diff inspection
+  help         Print this message or the help of the given subcommand(s)
+
+Options:
+      --workspace <WORKSPACE>      Target workspace directory to verify [default: .]
+      --task-id <TASK_ID>          Unique task identifier for correlation
+      --whitelist <WHITELIST>      Allowed file paths or prefixes whitelist (comma-separated)
+      --out <OUT>                  File path to write the signed receipt JSON output
+      --json                       Emit machine-readable execution receipt JSON to stdout
+      --runner <RUNNER>            Explicitly override language runner (e.g. cargo, pytest, npm)
+      --spec <SPEC>                Path to a JSON specification file containing task parameters
+      --base-branch <BASE_BRANCH>  Base branch for immutable test baseline comparison (e.g. main, dev)
+      --immutable-tests            Protect existing tests from line deletions against base branch
+      --review-pack                Generate a ReviewPack executive summary and payload for review integration
+  -h, --help                       Print help
+  -V, --version                    Print version
 ```
 
 ---
 
-## 📜 Execution Receipt Contract (`agent-receipt-v1.json`)
+## 💾 Global Receipt Bus & Persistence
+
+Every verification run signs an immutable execution receipt conforming to `docs/schemas/agent-receipt-v1.json`.
+
+### Path Resolution Hierarchy (`resolve_receipts_dir(None)`)
+
+Receipts are persisted using deterministic precedence:
+1. **Explicit CLI Target**: `--out <PATH>`
+2. **Environment Variable**: `$K0MARU_RECEIPT_DIR`
+3. **Default System Bus**: `~/.k0maru/receipts/<task_id>.json`
+
+```bash
+# Default output location:
+~/.k0maru/receipts/task_auth_01.json
+```
+
+Downstream consumers (such as `k0maru-agent-router` and `k0maru-agent-workspace`) query this directory using `query_receipt(task_id)` or `ingest_receipt` before permitting branch promotion or code review.
+
+---
+
+## 📜 Contract Payloads
+
+### 1. `ReviewPack` JSON Payload (`--review-pack --json`)
 
 ```json
 {
-  "$schema": "https://k0maru.dev/schemas/agent-receipt-v1.json",
   "task_id": "task_demo_01",
   "workspace": "/Users/k0maru3/workspace/my-project",
   "verdict": "success",
-  "checks": {
-    "compilation": {
-      "status": "passed",
-      "exit_code": 0
+  "receipt": {
+    "$schema": "https://k0maru.dev/schemas/agent-receipt-v1.json",
+    "task_id": "task_demo_01",
+    "workspace": "/Users/k0maru3/workspace/my-project",
+    "verdict": "success",
+    "checks": {
+      "compilation": { "status": "passed", "exit_code": 0 },
+      "tests": { "status": "passed", "total": 142, "failed": 0, "duration_ms": 1100 },
+      "linter": { "status": "passed", "warnings": 0, "exit_code": 0 },
+      "scope_guard": {
+        "status": "passed",
+        "modified_files": ["src/lib.rs", "tests/lib_test.rs"],
+        "unauthorized_files": []
+      }
     },
-    "tests": {
-      "status": "passed",
-      "total": 42,
-      "failed": 0,
-      "duration_ms": 320
-    },
-    "linter": {
-      "status": "passed",
-      "warnings": 0,
-      "exit_code": 0
-    },
-    "scope_guard": {
-      "status": "passed",
-      "modified_files": ["src/lib.rs", "tests/lib_test.rs"],
-      "unauthorized_files": []
+    "artifacts": {
+      "git_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "receipt_timestamp": "2026-10-12T12:00:00Z"
     }
   },
-  "artifacts": {
-    "git_patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "receipt_timestamp": "2026-10-12T16:00:00Z"
-  }
+  "changed_files": ["src/lib.rs", "tests/lib_test.rs"],
+  "diff_stat": "src/lib.rs | 12 ++++\ntests/lib_test.rs | 6 ++\n2 files changed, 18 insertions(+)",
+  "markdown_summary": "### ⚖️ Review Pack: task_demo_01\n- **Verdict**: ✅ Success\n- **Checks**: Compilation: passed | Tests: passed (142/142 passed) | Linter: passed (0 warnings) | Scope Guard: passed\n- **Git Patch SHA-256**: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`\n- **Changed Files (2)**: `src/lib.rs`, `tests/lib_test.rs`\n\n```text\nsrc/lib.rs | 12 ++++\ntests/lib_test.rs | 6 ++\n2 files changed, 18 insertions(+)\n```"
 }
+```
+
+### 2. Formatted Markdown Executive Summary
+
+```markdown
+### ⚖️ Review Pack: task_demo_01
+- **Verdict**: ✅ Success
+- **Checks**: Compilation: passed | Tests: passed (142/142 passed) | Linter: passed (0 warnings) | Scope Guard: passed
+- **Git Patch SHA-256**: `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`
+- **Changed Files (2)**: `src/lib.rs`, `tests/lib_test.rs`
+
+```text
+src/lib.rs | 12 ++++
+tests/lib_test.rs | 6 ++
+2 files changed, 18 insertions(+)
+```
 ```
 
 ---
 
-## 🧪 Testing & Verification
+## 🧪 Testing & Quality Gates
+
+The codebase strictly adheres to the engineering constitution outlined in [`AGENTS.md`](AGENTS.md):
 
 ```bash
-# Run comprehensive test suite (Unit & Integration tests)
+# 1. Run all unit and integration tests (140+ tests, <2.0s)
 cargo test
 
-# Run linter checks
+# 2. Zero-warning clippy gate
 cargo clippy --all-targets -- -D warnings
 
-# Check code formatting
+# 3. Check code formatting
 cargo fmt --check
+
+# 4. Living ADR invariant guard check
+k0maru guard check --diff
 ```
 
 ---

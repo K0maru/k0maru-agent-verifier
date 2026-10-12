@@ -27,10 +27,17 @@ pub struct Cli {
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Commands {
     /// Verify workspace quality gates and produce an execution receipt (default action)
+    #[command(alias = "run")]
     Verify(VerifyArgs),
     #[command(name = "review-pack")]
     /// Verify workspace quality gates and generate a ReviewPack for review integration
     ReviewPack(VerifyArgs),
+    #[command(name = "baseline")]
+    /// Verify workspace quality gates enforcing immutable test baseline protection
+    Baseline(VerifyArgs),
+    #[command(name = "diff")]
+    /// Verify workspace quality gates with scope guard and diff inspection
+    Diff(VerifyArgs),
 }
 
 #[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
@@ -121,6 +128,11 @@ impl Cli {
                 sub_args.review_pack = true;
                 sub_args.merge_fallback(self.root_args)
             }
+            Some(Commands::Baseline(mut sub_args)) => {
+                sub_args.immutable_tests = true;
+                sub_args.merge_fallback(self.root_args)
+            }
+            Some(Commands::Diff(sub_args)) => sub_args.merge_fallback(self.root_args),
             None => self.root_args,
         }
     }
@@ -468,6 +480,55 @@ mod tests {
         let resolved = cli.resolve();
         assert!(resolved.review_pack);
         assert_eq!(resolved.workspace, PathBuf::from("/tmp/demo-flag"));
+    }
+
+    #[test]
+    fn test_cli_run_alias_parsing() {
+        let args = vec![
+            "k0maru-verifier",
+            "run",
+            "--workspace",
+            "/tmp/demo-run",
+            "--task-id",
+            "run-1",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse run alias");
+        let resolved = cli.resolve();
+        assert_eq!(resolved.workspace, PathBuf::from("/tmp/demo-run"));
+        assert_eq!(resolved.task_id.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn test_cli_baseline_subcommand_parsing() {
+        let args = vec![
+            "k0maru-verifier",
+            "baseline",
+            "--workspace",
+            "/tmp/demo-base",
+            "--base-branch",
+            "main",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse baseline subcommand");
+        let resolved = cli.resolve();
+        assert_eq!(resolved.workspace, PathBuf::from("/tmp/demo-base"));
+        assert_eq!(resolved.base_branch.as_deref(), Some("main"));
+        assert!(resolved.immutable_tests);
+    }
+
+    #[test]
+    fn test_cli_diff_subcommand_parsing() {
+        let args = vec![
+            "k0maru-verifier",
+            "diff",
+            "--workspace",
+            "/tmp/demo-diff",
+            "--whitelist",
+            "src/",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse diff subcommand");
+        let resolved = cli.resolve();
+        assert_eq!(resolved.workspace, PathBuf::from("/tmp/demo-diff"));
+        assert_eq!(resolved.whitelist, Some(vec!["src/".to_string()]));
     }
 
     #[test]
