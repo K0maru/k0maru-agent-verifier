@@ -160,6 +160,8 @@ impl LanguageRunner for CargoRunner {
                     failed: 1,
                     duration_ms: Some(0),
                     message: Some(format!("Failed to spawn cargo test: {e}")),
+                    flaky_quarantined: None,
+                    retries: None,
                 });
             }
         };
@@ -200,6 +202,8 @@ impl LanguageRunner for CargoRunner {
             failed,
             duration_ms: Some(exec.duration_ms),
             message,
+            flaky_quarantined: None,
+            retries: None,
         })
     }
 
@@ -340,6 +344,8 @@ impl LanguageRunner for PytestRunner {
                             failed: 1,
                             duration_ms: Some(0),
                             message: Some(format!("Failed to spawn pytest: {e}")),
+                            flaky_quarantined: None,
+                            retries: None,
                         });
                     }
                 }
@@ -382,6 +388,8 @@ impl LanguageRunner for PytestRunner {
             failed,
             duration_ms: Some(exec.duration_ms),
             message,
+            flaky_quarantined: None,
+            retries: None,
         })
     }
 
@@ -548,6 +556,8 @@ impl LanguageRunner for NpmRunner {
                     failed: 1,
                     duration_ms: Some(0),
                     message: Some(format!("Failed to execute npm test: {e}")),
+                    flaky_quarantined: None,
+                    retries: None,
                 });
             }
         };
@@ -577,6 +587,8 @@ impl LanguageRunner for NpmRunner {
             failed,
             duration_ms: Some(exec.duration_ms),
             message,
+            flaky_quarantined: None,
+            retries: None,
         })
     }
 

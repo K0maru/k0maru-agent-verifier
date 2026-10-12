@@ -157,11 +157,56 @@ pub struct TestCheck {
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flaky_quarantined: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retries: Option<usize>,
 }
 
 impl TestCheck {
     pub fn is_passed(&self) -> bool {
         self.status.is_passed() && self.failed == 0 && self.exit_code.unwrap_or(0) == 0
+    }
+}
+
+/// Diff coverage check result ensuring newly added/modified lines meet coverage threshold.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffCoverageCheck {
+    pub status: StepStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_threshold: Option<f64>,
+    pub covered_lines: usize,
+    pub total_lines: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl DiffCoverageCheck {
+    pub fn is_passed(&self) -> bool {
+        self.status.is_passed()
+    }
+}
+
+impl Eq for DiffCoverageCheck {}
+
+impl PartialEq for DiffCoverageCheck {
+    fn eq(&self, other: &Self) -> bool {
+        self.status == other.status
+            && self.covered_lines == other.covered_lines
+            && self.total_lines == other.total_lines
+            && self.message == other.message
+            && match (self.coverage_pct, other.coverage_pct) {
+                (Some(a), Some(b)) => (a - b).abs() < 1e-6 || a.to_bits() == b.to_bits(),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (self.min_threshold, other.min_threshold) {
+                (Some(a), Some(b)) => (a - b).abs() < 1e-6 || a.to_bits() == b.to_bits(),
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
@@ -235,14 +280,21 @@ pub struct CheckSummary {
     pub tests: TestCheck,
     pub linter: LinterCheck,
     pub scope_guard: ScopeGuardCheck,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_coverage: Option<DiffCoverageCheck>,
 }
 
 impl CheckSummary {
     pub fn is_all_passed(&self) -> bool {
-        self.compilation.is_passed()
+        let base = self.compilation.is_passed()
             && self.tests.is_passed()
             && self.linter.is_passed()
-            && self.scope_guard.is_passed()
+            && self.scope_guard.is_passed();
+        if let Some(ref cov) = self.diff_coverage {
+            base && cov.is_passed()
+        } else {
+            base
+        }
     }
 }
 
@@ -388,6 +440,20 @@ impl ExecutionReceipt {
             )));
         }
 
+        // Validate diff coverage check consistency if present
+        if let Some(ref cov) = self.checks.diff_coverage {
+            if cov.status.is_passed() {
+                if let (Some(pct), Some(min)) = (cov.coverage_pct, cov.min_threshold) {
+                    if pct < min && cov.total_lines > 0 {
+                        return Err(VerifierError::InvalidReceipt(format!(
+                            "Diff coverage marked 'passed' but coverage ({:.1}%) is below minimum threshold ({:.1}%)",
+                            pct, min
+                        )));
+                    }
+                }
+            }
+        }
+
         // Validate verdict consistency
         if self.verdict.is_success() && !self.checks.is_all_passed() {
             return Err(VerifierError::InvalidReceipt(
@@ -428,8 +494,27 @@ impl ExecutionReceipt {
             Some(m) if !m.is_empty() => format!(" - message: {}", m),
             _ => String::new(),
         };
+        let cov_line = match &self.checks.diff_coverage {
+            Some(cov) => format!(
+                "\n    - diff_coverage: {} ({:.1}% vs min {:.1}%, {}/{} lines)",
+                cov.status,
+                cov.coverage_pct.unwrap_or(0.0),
+                cov.min_threshold.unwrap_or(0.0),
+                cov.covered_lines,
+                cov.total_lines,
+            ),
+            None => String::new(),
+        };
+        let flaky_note = if self.checks.tests.flaky_quarantined == Some(true) {
+            format!(
+                " [quarantined after {} retries]",
+                self.checks.tests.retries.unwrap_or(1)
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "Receipt [{} | {}]\n  Workspace: {}\n  Verdict: {}\n  Checks:\n    - compilation: {} (exit {}){}\n    - tests: {} ({}/{} failed, duration: {}ms)\n    - linter: {} ({} warnings)\n    - scope_guard: {} ({} modified, {} unauthorized)\n  Artifacts:\n    - patch sha256: {}\n    - timestamp: {}",
+            "Receipt [{} | {}]\n  Workspace: {}\n  Verdict: {}\n  Checks:\n    - compilation: {} (exit {}){}\n    - tests: {} ({}/{} failed, duration: {}ms){}{}\n    - linter: {} ({} warnings)\n    - scope_guard: {} ({} modified, {} unauthorized)\n  Artifacts:\n    - patch sha256: {}\n    - timestamp: {}",
             self.task_id,
             pass_status,
             self.workspace.display(),
@@ -441,6 +526,8 @@ impl ExecutionReceipt {
             self.checks.tests.failed,
             self.checks.tests.total,
             self.checks.tests.duration_ms.unwrap_or(0),
+            flaky_note,
+            cov_line,
             self.checks.linter.status,
             self.checks.linter.warnings,
             self.checks.scope_guard.status,
@@ -530,6 +617,8 @@ mod tests {
                     failed: 0,
                     duration_ms: Some(150),
                     message: None,
+                    flaky_quarantined: None,
+                    retries: None,
                 },
                 linter: LinterCheck {
                     status: StepStatus::Passed,
@@ -543,6 +632,7 @@ mod tests {
                     unauthorized_files: Vec::new(),
                     message: None,
                 },
+                diff_coverage: None,
             },
             artifacts: ArtifactSummary {
                 git_patch_sha256: Some(
@@ -713,6 +803,8 @@ mod tests {
             failed: 0,
             duration_ms: None,
             message: None,
+            flaky_quarantined: None,
+            retries: None,
         };
         assert!(test_pass.is_passed());
 
@@ -723,6 +815,8 @@ mod tests {
             failed: 1,
             duration_ms: None,
             message: None,
+            flaky_quarantined: None,
+            retries: None,
         };
         assert!(!test_fail.is_passed());
 
@@ -775,6 +869,8 @@ mod tests {
             failed: 0,
             duration_ms: None,
             message: None,
+            flaky_quarantined: None,
+            retries: None,
         };
         assert!(t.is_passed());
 

@@ -24,6 +24,8 @@ pub enum VerifierError {
     RunnerError(String),
     #[error("Runner not found: {0}")]
     RunnerNotFound(String),
+    #[error("Diff coverage error: {0}")]
+    CoverageError(String),
     #[error("Command timeout: {0}")]
     Timeout(String),
 }

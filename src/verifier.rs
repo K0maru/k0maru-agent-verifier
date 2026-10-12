@@ -26,6 +26,12 @@ pub struct VerifierConfig {
     pub base_branch: Option<String>,
     /// Whether to enforce immutable test protection preventing deletion of existing test lines.
     pub immutable_tests: bool,
+    /// Minimum required test coverage percentage on newly added/modified diff lines.
+    pub min_diff_coverage: Option<f64>,
+    /// Optional path to coverage report file (LCOV or JSON).
+    pub coverage_file: Option<PathBuf>,
+    /// Maximum retry attempts for transient flaky test failures.
+    pub flaky_retry: usize,
 }
 
 impl VerifierConfig {
@@ -39,6 +45,9 @@ impl VerifierConfig {
             auto_detect: true,
             base_branch: None,
             immutable_tests: false,
+            min_diff_coverage: None,
+            coverage_file: None,
+            flaky_retry: 0,
         }
     }
 
@@ -83,6 +92,24 @@ impl VerifierConfig {
         self.immutable_tests = immutable_tests;
         self
     }
+
+    /// Sets minimum required diff coverage threshold percentage.
+    pub fn min_diff_coverage(mut self, min: impl Into<Option<f64>>) -> Self {
+        self.min_diff_coverage = min.into();
+        self
+    }
+
+    /// Sets explicit coverage report file path.
+    pub fn coverage_file(mut self, file: impl Into<Option<PathBuf>>) -> Self {
+        self.coverage_file = file.into();
+        self
+    }
+
+    /// Sets maximum retry attempts for flaky test quarantine.
+    pub fn flaky_retry(mut self, retries: usize) -> Self {
+        self.flaky_retry = retries;
+        self
+    }
 }
 
 impl Default for VerifierConfig {
@@ -95,6 +122,9 @@ impl Default for VerifierConfig {
             auto_detect: true,
             base_branch: None,
             immutable_tests: false,
+            min_diff_coverage: None,
+            coverage_file: None,
+            flaky_retry: 0,
         }
     }
 }
@@ -171,7 +201,33 @@ impl WorkspaceVerifier {
         let (compilation, tests, linter) = match selected_runner {
             Some(runner) => {
                 let comp = runner.check(&workspace).await?;
-                let t = runner.test(&workspace).await?;
+
+                let mut t = runner.test(&workspace).await?;
+                let mut retry_count = 0;
+                while !t.is_passed() && retry_count < config.flaky_retry {
+                    retry_count += 1;
+                    let retry_res = runner.test(&workspace).await?;
+                    if retry_res.is_passed() {
+                        let initial_failed = t.failed;
+                        t = TestCheck {
+                            status: StepStatus::Passed,
+                            exit_code: Some(0),
+                            total: retry_res.total,
+                            failed: 0,
+                            duration_ms: retry_res.duration_ms,
+                            message: Some(format!(
+                                "Passed after retry #{}/{} (quarantined flaky test; initial run had {} failures)",
+                                retry_count, config.flaky_retry, initial_failed
+                            )),
+                            flaky_quarantined: Some(true),
+                            retries: Some(retry_count),
+                        };
+                        break;
+                    } else {
+                        t = retry_res;
+                    }
+                }
+
                 let lint = runner.lint(&workspace).await?;
                 (comp, t, lint)
             }
@@ -194,6 +250,8 @@ impl WorkspaceVerifier {
                         failed: 0,
                         duration_ms: None,
                         message: Some(msg.clone()),
+                        flaky_quarantined: None,
+                        retries: None,
                     },
                     LinterCheck {
                         status: StepStatus::Skipped,
@@ -227,14 +285,32 @@ impl WorkspaceVerifier {
             Err(e) => return Err(e),
         };
 
-        // 6. Compute Git Patch SHA-256 fingerprint
+        // 6. Diff coverage check (if requested)
+        let diff_coverage = if config.min_diff_coverage.is_some() || config.coverage_file.is_some()
+        {
+            crate::coverage::check_diff_coverage(
+                &workspace,
+                config.min_diff_coverage,
+                config.coverage_file.as_deref(),
+                config.base_branch.as_deref(),
+            )
+            .await?
+        } else {
+            None
+        };
+
+        // 7. Compute Git Patch SHA-256 fingerprint
         let git_patch_sha256 = compute_git_diff_sha256(&workspace).await;
 
-        // 7. Formulate Verdict
+        // 8. Formulate Verdict
         let checks_all_passed = compilation.is_passed()
             && tests.is_passed()
             && linter.is_passed()
-            && scope_guard.is_passed();
+            && scope_guard.is_passed()
+            && diff_coverage
+                .as_ref()
+                .map(|c| c.is_passed())
+                .unwrap_or(true);
 
         let verdict = if is_blocked {
             VerdictStatus::Blocked
@@ -244,7 +320,7 @@ impl WorkspaceVerifier {
             VerdictStatus::Failed
         };
 
-        // 8. Build Receipt
+        // 9. Build Receipt
         let receipt = ExecutionReceipt {
             schema: DEFAULT_RECEIPT_SCHEMA.to_string(),
             task_id: config.task_id.clone(),
@@ -255,6 +331,7 @@ impl WorkspaceVerifier {
                 tests,
                 linter,
                 scope_guard,
+                diff_coverage,
             },
             artifacts: ArtifactSummary {
                 git_patch_sha256,
@@ -353,6 +430,8 @@ mod tests {
                 failed: 0,
                 duration_ms: Some(50),
                 message: None,
+                flaky_quarantined: None,
+                retries: None,
             },
             linter: LinterCheck {
                 status: StepStatus::Passed,
@@ -457,6 +536,8 @@ mod tests {
             failed: 2,
             duration_ms: Some(100),
             message: Some("2 tests failed".to_string()),
+            flaky_quarantined: None,
+            retries: None,
         };
 
         let mut registry = RunnerRegistry::empty();

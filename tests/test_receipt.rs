@@ -25,6 +25,8 @@ fn sample_passing_receipt() -> ExecutionReceipt {
                 failed: 0,
                 duration_ms: Some(350),
                 message: None,
+                flaky_quarantined: None,
+                retries: None,
             },
             linter: LinterCheck {
                 status: StepStatus::Passed,
@@ -41,6 +43,7 @@ fn sample_passing_receipt() -> ExecutionReceipt {
                 unauthorized_files: Vec::new(),
                 message: None,
             },
+            diff_coverage: None,
         },
         artifacts: ArtifactSummary {
             git_patch_sha256: Some(
@@ -211,6 +214,8 @@ fn test_test_check_is_passed() {
         failed: 0,
         duration_ms: Some(120),
         message: None,
+        flaky_quarantined: None,
+        retries: None,
     };
     assert!(passed.is_passed());
 
@@ -221,6 +226,8 @@ fn test_test_check_is_passed() {
         failed: 0,
         duration_ms: None,
         message: None,
+        flaky_quarantined: None,
+        retries: None,
     };
     assert!(passed_no_exit_code.is_passed());
 
@@ -231,6 +238,8 @@ fn test_test_check_is_passed() {
         failed: 1,
         duration_ms: None,
         message: None,
+        flaky_quarantined: None,
+        retries: None,
     };
     assert!(!failed_tests.is_passed());
 
@@ -241,6 +250,8 @@ fn test_test_check_is_passed() {
         failed: 0,
         duration_ms: None,
         message: None,
+        flaky_quarantined: None,
+        retries: None,
     };
     assert!(!non_zero_exit.is_passed());
 
@@ -251,6 +262,8 @@ fn test_test_check_is_passed() {
         failed: 1,
         duration_ms: None,
         message: None,
+        flaky_quarantined: None,
+        retries: None,
     };
     assert!(!failed_status.is_passed());
 }

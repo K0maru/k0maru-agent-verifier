@@ -38,9 +38,12 @@ pub enum Commands {
     #[command(name = "diff")]
     /// Verify workspace quality gates with scope guard and diff inspection
     Diff(VerifyArgs),
+    #[command(name = "diff-coverage")]
+    /// Verify workspace quality gates enforcing minimum diff coverage threshold
+    DiffCoverage(VerifyArgs),
 }
 
-#[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Args, Debug, Clone, Default)]
 pub struct VerifyArgs {
     /// Target workspace directory to verify
     #[arg(long, default_value = ".")]
@@ -81,6 +84,42 @@ pub struct VerifyArgs {
     /// Generate a ReviewPack executive summary and payload for review integration
     #[arg(long)]
     pub review_pack: bool,
+
+    /// Minimum required test coverage percentage on newly added/modified diff lines (0-100)
+    #[arg(long)]
+    pub min_diff_coverage: Option<f64>,
+
+    /// Path to explicit coverage report file (LCOV or JSON)
+    #[arg(long)]
+    pub coverage_file: Option<PathBuf>,
+
+    /// Maximum retry attempts for transient flaky test failures
+    #[arg(long, default_value = "0")]
+    pub flaky_retry: usize,
+}
+
+impl Eq for VerifyArgs {}
+
+impl PartialEq for VerifyArgs {
+    fn eq(&self, other: &Self) -> bool {
+        self.workspace == other.workspace
+            && self.task_id == other.task_id
+            && self.whitelist == other.whitelist
+            && self.out == other.out
+            && self.json == other.json
+            && self.runner == other.runner
+            && self.spec == other.spec
+            && self.base_branch == other.base_branch
+            && self.immutable_tests == other.immutable_tests
+            && self.review_pack == other.review_pack
+            && self.coverage_file == other.coverage_file
+            && self.flaky_retry == other.flaky_retry
+            && match (self.min_diff_coverage, other.min_diff_coverage) {
+                (Some(a), Some(b)) => (a - b).abs() < 1e-6 || a.to_bits() == b.to_bits(),
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 impl VerifyArgs {
@@ -115,6 +154,15 @@ impl VerifyArgs {
         }
         self.immutable_tests = self.immutable_tests || fallback.immutable_tests;
         self.review_pack = self.review_pack || fallback.review_pack;
+        if self.min_diff_coverage.is_none() {
+            self.min_diff_coverage = fallback.min_diff_coverage;
+        }
+        if self.coverage_file.is_none() {
+            self.coverage_file = fallback.coverage_file;
+        }
+        if self.flaky_retry == 0 {
+            self.flaky_retry = fallback.flaky_retry;
+        }
         self
     }
 }
@@ -133,6 +181,7 @@ impl Cli {
                 sub_args.merge_fallback(self.root_args)
             }
             Some(Commands::Diff(sub_args)) => sub_args.merge_fallback(self.root_args),
+            Some(Commands::DiffCoverage(sub_args)) => sub_args.merge_fallback(self.root_args),
             None => self.root_args,
         }
     }
@@ -148,6 +197,9 @@ pub struct TaskSpec {
     pub runner: Option<String>,
     pub base_branch: Option<String>,
     pub immutable_tests: Option<bool>,
+    pub min_diff_coverage: Option<f64>,
+    pub coverage_file: Option<String>,
+    pub flaky_retry: Option<usize>,
 }
 
 /// Merges command-line arguments with an optional specification file.
@@ -213,11 +265,29 @@ pub fn merge_args_with_spec(args: &VerifyArgs) -> Result<VerifierConfig, i32> {
             .and_then(|s| s.immutable_tests)
             .unwrap_or(false);
 
+    let min_diff_coverage = args
+        .min_diff_coverage
+        .or_else(|| spec.as_ref().and_then(|s| s.min_diff_coverage));
+
+    let coverage_file = args.coverage_file.clone().or_else(|| {
+        spec.as_ref()
+            .and_then(|s| s.coverage_file.as_ref().map(PathBuf::from))
+    });
+
+    let flaky_retry = if args.flaky_retry > 0 {
+        args.flaky_retry
+    } else {
+        spec.as_ref().and_then(|s| s.flaky_retry).unwrap_or(0)
+    };
+
     Ok(VerifierConfig::new(workspace, task_id)
         .whitelist(whitelist)
         .override_runner(override_runner)
         .base_branch(base_branch)
         .immutable_tests(immutable_tests)
+        .min_diff_coverage(min_diff_coverage)
+        .coverage_file(coverage_file)
+        .flaky_retry(flaky_retry)
         .auto_detect(true))
 }
 
@@ -254,12 +324,21 @@ pub fn format_pretty_summary(receipt: &ExecutionReceipt) -> String {
         "{} (exit code: {})",
         receipt.checks.compilation.status, receipt.checks.compilation.exit_code
     );
+    let test_flaky_note = if receipt.checks.tests.flaky_quarantined == Some(true) {
+        format!(
+            " [quarantined retry #{}]",
+            receipt.checks.tests.retries.unwrap_or(1)
+        )
+    } else {
+        String::new()
+    };
     let test_detail = format!(
-        "{} ({}/{} failed, duration: {}ms)",
+        "{} ({}/{} failed, duration: {}ms){}",
         receipt.checks.tests.status,
         receipt.checks.tests.failed,
         receipt.checks.tests.total,
-        receipt.checks.tests.duration_ms.unwrap_or(0)
+        receipt.checks.tests.duration_ms.unwrap_or(0),
+        test_flaky_note
     );
     let lint_detail = format!(
         "{} (warnings: {})",
@@ -271,6 +350,26 @@ pub fn format_pretty_summary(receipt: &ExecutionReceipt) -> String {
         receipt.checks.scope_guard.modified_files.len(),
         receipt.checks.scope_guard.unauthorized_files.len()
     );
+
+    let cov_line = match &receipt.checks.diff_coverage {
+        Some(cov) => {
+            let icon = match cov.status {
+                StepStatus::Passed => "✅",
+                StepStatus::Failed => "❌",
+                StepStatus::Skipped => "⏭️ ",
+            };
+            format!(
+                "\n    {} Diff Coverage: {} ({:.1}% vs min {:.1}%, {}/{} lines)",
+                icon,
+                cov.status,
+                cov.coverage_pct.unwrap_or(0.0),
+                cov.min_threshold.unwrap_or(0.0),
+                cov.covered_lines,
+                cov.total_lines
+            )
+        }
+        None => String::new(),
+    };
 
     let patch_sha = receipt
         .artifacts
@@ -295,7 +394,7 @@ pub fn format_pretty_summary(receipt: &ExecutionReceipt) -> String {
     {} Compilation:  {}
     {} Tests:        {}
     {} Linter:       {}
-    {} Scope Guard:  {}
+    {} Scope Guard:  {}{cov_line}
 ──────────────────────────────────────────────────────────────────
   Artifacts:
     📜 Git SHA-256:  {}
@@ -556,6 +655,25 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_diff_coverage_subcommand_parsing() {
+        let args = vec![
+            "k0maru-verifier",
+            "diff-coverage",
+            "--workspace",
+            "/tmp/demo-cov",
+            "--min-diff-coverage",
+            "80.5",
+            "--flaky-retry",
+            "3",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse diff-coverage subcommand");
+        let resolved = cli.resolve();
+        assert_eq!(resolved.workspace, PathBuf::from("/tmp/demo-cov"));
+        assert_eq!(resolved.min_diff_coverage, Some(80.5));
+        assert_eq!(resolved.flaky_retry, 3);
+    }
+
+    #[test]
     fn test_verify_args_merge_fallback() {
         let root = VerifyArgs {
             workspace: PathBuf::from("/tmp/root-ws"),
@@ -568,6 +686,9 @@ mod tests {
             base_branch: Some("main".to_string()),
             immutable_tests: true,
             review_pack: true,
+            min_diff_coverage: Some(85.0),
+            coverage_file: Some(PathBuf::from("lcov.info")),
+            flaky_retry: 2,
         };
 
         // When sub is default, all values fall back to root
@@ -583,12 +704,16 @@ mod tests {
         assert_eq!(merged.base_branch.as_deref(), Some("main"));
         assert!(merged.immutable_tests);
         assert!(merged.review_pack);
+        assert_eq!(merged.min_diff_coverage, Some(85.0));
+        assert_eq!(merged.coverage_file, Some(PathBuf::from("lcov.info")));
+        assert_eq!(merged.flaky_retry, 2);
 
         // When sub provides explicit values, they take precedence
         let sub_explicit = VerifyArgs {
             workspace: PathBuf::from("/tmp/sub-ws"),
             task_id: Some("sub-task".to_string()),
             json: false,
+            min_diff_coverage: Some(90.0),
             ..Default::default()
         };
         let merged_explicit = sub_explicit.merge_fallback(root);
@@ -599,6 +724,12 @@ mod tests {
         assert_eq!(merged_explicit.base_branch.as_deref(), Some("main"));
         assert!(merged_explicit.immutable_tests);
         assert!(merged_explicit.review_pack);
+        assert_eq!(merged_explicit.min_diff_coverage, Some(90.0));
+        assert_eq!(
+            merged_explicit.coverage_file,
+            Some(PathBuf::from("lcov.info"))
+        );
+        assert_eq!(merged_explicit.flaky_retry, 2);
     }
 
     #[test]
@@ -674,6 +805,8 @@ mod tests {
                     failed: 0,
                     duration_ms: Some(120),
                     message: None,
+                    flaky_quarantined: None,
+                    retries: None,
                 },
                 linter: LinterCheck {
                     status: StepStatus::Passed,
@@ -687,6 +820,7 @@ mod tests {
                     unauthorized_files: Vec::new(),
                     message: None,
                 },
+                diff_coverage: None,
             },
             artifacts: ArtifactSummary {
                 git_patch_sha256: Some("abcdef1234567890".to_string()),

@@ -24,6 +24,8 @@ fn sample_receipt() -> ExecutionReceipt {
                 failed: 0,
                 duration_ms: Some(42),
                 message: None,
+                flaky_quarantined: None,
+                retries: None,
             },
             linter: LinterCheck {
                 status: StepStatus::Passed,
@@ -37,6 +39,7 @@ fn sample_receipt() -> ExecutionReceipt {
                 unauthorized_files: Vec::new(),
                 message: None,
             },
+            diff_coverage: None,
         },
         artifacts: ArtifactSummary {
             git_patch_sha256: Some(
