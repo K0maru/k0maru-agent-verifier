@@ -9,78 +9,95 @@ use std::process::ExitCode;
 #[command(
     name = "k0maru-verifier",
     about = "Deterministic test oracle and execution receipt signer for K0maru-Harness",
+    long_about = "Deterministic test oracle and execution receipt signer for K0maru-Harness.\n\n\
+                  Running without a subcommand executes verification directly:\n  \
+                  k0maru-verifier [OPTIONS]\n\n\
+                  The 'verify' subcommand is also supported:\n  \
+                  k0maru-verifier verify [OPTIONS]",
     version
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    #[arg(long, default_value = ".")]
-    pub workspace: PathBuf,
-
-    #[arg(long)]
-    pub task_id: Option<String>,
-
-    #[arg(long, value_delimiter = ',')]
-    pub whitelist: Option<Vec<String>>,
-
-    #[arg(long)]
-    pub out: Option<PathBuf>,
-
-    #[arg(long)]
-    pub json: bool,
-
-    #[arg(long)]
-    pub runner: Option<String>,
-
-    #[arg(long)]
-    pub spec: Option<PathBuf>,
+    #[command(flatten)]
+    pub root_args: VerifyArgs,
 }
 
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Commands {
-    /// Verify workspace quality gates and produce an execution receipt.
+    /// Verify workspace quality gates and produce an execution receipt (default action)
     Verify(VerifyArgs),
 }
 
-#[derive(Args, Debug, Clone, Default)]
+#[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
 pub struct VerifyArgs {
+    /// Target workspace directory to verify
     #[arg(long, default_value = ".")]
     pub workspace: PathBuf,
 
+    /// Unique task identifier for correlation
     #[arg(long)]
     pub task_id: Option<String>,
 
+    /// Allowed file paths or prefixes whitelist (comma-separated)
     #[arg(long, value_delimiter = ',')]
     pub whitelist: Option<Vec<String>>,
 
+    /// File path to write the signed receipt JSON output
     #[arg(long)]
     pub out: Option<PathBuf>,
 
+    /// Emit machine-readable execution receipt JSON to stdout
     #[arg(long)]
     pub json: bool,
 
+    /// Explicitly override language runner (e.g. cargo, pytest, npm)
     #[arg(long)]
     pub runner: Option<String>,
 
+    /// Path to a JSON specification file containing task parameters
     #[arg(long)]
     pub spec: Option<PathBuf>,
 }
 
+impl VerifyArgs {
+    /// Merges another `VerifyArgs` as a fallback for unset values.
+    pub fn merge_fallback(mut self, fallback: VerifyArgs) -> Self {
+        let is_default_ws =
+            self.workspace.as_os_str().is_empty() || self.workspace == std::path::Path::new(".");
+        let has_custom_fallback_ws = !fallback.workspace.as_os_str().is_empty()
+            && fallback.workspace != std::path::Path::new(".");
+
+        if is_default_ws && has_custom_fallback_ws {
+            self.workspace = fallback.workspace;
+        }
+        if self.task_id.is_none() {
+            self.task_id = fallback.task_id;
+        }
+        if self.whitelist.is_none() {
+            self.whitelist = fallback.whitelist;
+        }
+        if self.out.is_none() {
+            self.out = fallback.out;
+        }
+        self.json = self.json || fallback.json;
+        if self.runner.is_none() {
+            self.runner = fallback.runner;
+        }
+        if self.spec.is_none() {
+            self.spec = fallback.spec;
+        }
+        self
+    }
+}
+
 impl Cli {
-    /// Flattens either the `verify` subcommand or root-level flags into unified `VerifyArgs`.
+    /// Resolves either the `verify` subcommand or root-level flags into unified `VerifyArgs`.
     pub fn resolve(self) -> VerifyArgs {
         match self.command {
-            Some(Commands::Verify(args)) => args,
-            None => VerifyArgs {
-                workspace: self.workspace,
-                task_id: self.task_id,
-                whitelist: self.whitelist,
-                out: self.out,
-                json: self.json,
-                runner: self.runner,
-                spec: self.spec,
-            },
+            Some(Commands::Verify(sub_args)) => sub_args.merge_fallback(self.root_args),
+            None => self.root_args,
         }
     }
 }
@@ -357,6 +374,43 @@ mod tests {
             Some(vec!["src/".to_string(), "tests/".to_string()])
         );
         assert!(resolved.json);
+    }
+
+    #[test]
+    fn test_verify_args_merge_fallback() {
+        let root = VerifyArgs {
+            workspace: PathBuf::from("/tmp/root-ws"),
+            task_id: Some("root-task".to_string()),
+            whitelist: Some(vec!["src/".to_string()]),
+            out: Some(PathBuf::from("receipt.json")),
+            json: true,
+            runner: Some("cargo".to_string()),
+            spec: Some(PathBuf::from("spec.json")),
+        };
+
+        // When sub is default, all values fall back to root
+        let sub_default = VerifyArgs::default();
+        let merged = sub_default.merge_fallback(root.clone());
+        assert_eq!(merged.workspace, PathBuf::from("/tmp/root-ws"));
+        assert_eq!(merged.task_id.as_deref(), Some("root-task"));
+        assert_eq!(merged.whitelist, Some(vec!["src/".to_string()]));
+        assert_eq!(merged.out, Some(PathBuf::from("receipt.json")));
+        assert!(merged.json);
+        assert_eq!(merged.runner.as_deref(), Some("cargo"));
+        assert_eq!(merged.spec, Some(PathBuf::from("spec.json")));
+
+        // When sub provides explicit values, they take precedence
+        let sub_explicit = VerifyArgs {
+            workspace: PathBuf::from("/tmp/sub-ws"),
+            task_id: Some("sub-task".to_string()),
+            json: false,
+            ..Default::default()
+        };
+        let merged_explicit = sub_explicit.merge_fallback(root);
+        assert_eq!(merged_explicit.workspace, PathBuf::from("/tmp/sub-ws"));
+        assert_eq!(merged_explicit.task_id.as_deref(), Some("sub-task"));
+        assert!(merged_explicit.json); // json is OR'd
+        assert_eq!(merged_explicit.whitelist, Some(vec!["src/".to_string()]));
     }
 
     #[test]
