@@ -1,0 +1,130 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExecutionReceipt",
+  "description": "Deterministic Execution Receipt for K0maru-Harness agent task execution",
+  "type": "object",
+  "required": [
+    "$schema",
+    "task_id",
+    "workspace",
+    "verdict",
+    "checks",
+    "artifacts"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "workspace": {
+      "type": "string"
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["success", "failed", "blocked"]
+    },
+    "checks": {
+      "type": "object",
+      "required": ["compilation", "tests", "linter", "scope_guard"],
+      "properties": {
+        "compilation": {
+          "type": "object",
+          "required": ["status", "exit_code"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["passed", "failed", "skipped"]
+            },
+            "exit_code": {
+              "type": "integer"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "tests": {
+          "type": "object",
+          "required": ["status", "total", "failed"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["passed", "failed", "skipped"]
+            },
+            "exit_code": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "failed": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "duration_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "linter": {
+          "type": "object",
+          "required": ["status", "warnings"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["passed", "failed", "skipped"]
+            },
+            "warnings": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "exit_code": {
+              "type": "integer"
+            },
+            "message": {
+              "type": "string"
+            }
+          }
+        },
+        "scope_guard": {
+          "type": "object",
+          "required": ["status", "modified_files"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["passed", "failed", "skipped"]
+            },
+            "modified_files": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "unauthorized_files": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "properties": {
+        "git_patch_sha256": {
+          "type": "string"
+        },
+        "receipt_timestamp": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

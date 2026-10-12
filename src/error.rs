@@ -18,4 +18,12 @@ pub enum VerifierError {
     ScopeViolation(Vec<String>),
     #[error("Git error: {0}")]
     GitError(String),
+    #[error("Invalid execution receipt: {0}")]
+    InvalidReceipt(String),
+    #[error("Runner error: {0}")]
+    RunnerError(String),
+    #[error("Runner not found: {0}")]
+    RunnerNotFound(String),
+    #[error("Command timeout: {0}")]
+    Timeout(String),
 }
