@@ -4,6 +4,7 @@ pub mod constants;
 pub mod error;
 pub mod guard;
 pub mod receipt;
+pub mod review;
 pub mod runner;
 pub mod verifier;
 
@@ -15,5 +16,6 @@ pub use receipt::{
     ScopeGuardCheck, ScopeGuardResult, StepResult, StepStatus, TestCheck, TestStepResult,
     VerdictStatus,
 };
+pub use review::ReviewPack;
 pub use runner::{LanguageRunner, RunnerRegistry};
 pub use verifier::{VerifierConfig, WorkspaceVerifier};

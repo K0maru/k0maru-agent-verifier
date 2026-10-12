@@ -28,6 +28,9 @@ pub struct Cli {
 pub enum Commands {
     /// Verify workspace quality gates and produce an execution receipt (default action)
     Verify(VerifyArgs),
+    #[command(name = "review-pack")]
+    /// Verify workspace quality gates and generate a ReviewPack for review integration
+    ReviewPack(VerifyArgs),
 }
 
 #[derive(Args, Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +70,10 @@ pub struct VerifyArgs {
     /// Protect existing tests from line deletions against base branch
     #[arg(long)]
     pub immutable_tests: bool,
+
+    /// Generate a ReviewPack executive summary and payload for review integration
+    #[arg(long)]
+    pub review_pack: bool,
 }
 
 impl VerifyArgs {
@@ -100,15 +107,20 @@ impl VerifyArgs {
             self.base_branch = fallback.base_branch;
         }
         self.immutable_tests = self.immutable_tests || fallback.immutable_tests;
+        self.review_pack = self.review_pack || fallback.review_pack;
         self
     }
 }
 
 impl Cli {
-    /// Resolves either the `verify` subcommand or root-level flags into unified `VerifyArgs`.
+    /// Resolves either the subcommand or root-level flags into unified `VerifyArgs`.
     pub fn resolve(self) -> VerifyArgs {
         match self.command {
             Some(Commands::Verify(sub_args)) => sub_args.merge_fallback(self.root_args),
+            Some(Commands::ReviewPack(mut sub_args)) => {
+                sub_args.review_pack = true;
+                sub_args.merge_fallback(self.root_args)
+            }
             None => self.root_args,
         }
     }
@@ -359,11 +371,40 @@ async fn main() -> ExitCode {
         return ExitCode::from(k0maru_verifier::constants::EXIT_FATAL_ERROR as u8);
     }
 
-    if args.json {
-        println!("{json_receipt}");
+    if args.review_pack && receipt.verdict == VerdictStatus::Success {
+        let review_pack = match k0maru_verifier::ReviewPack::generate(
+            receipt.clone(),
+            args.base_branch.as_deref(),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("❌ Failed to generate review pack: {e}");
+                return ExitCode::from(k0maru_verifier::constants::EXIT_FATAL_ERROR as u8);
+            }
+        };
+
+        if args.json {
+            let json_pack = match serde_json::to_string_pretty(&review_pack) {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("❌ Failed to serialize review pack: {e}");
+                    return ExitCode::from(k0maru_verifier::constants::EXIT_FATAL_ERROR as u8);
+                }
+            };
+            println!("{json_pack}");
+        } else {
+            println!("{}", review_pack.markdown_summary);
+            println!("📜 Receipt written to {}", target_receipt_path.display());
+        }
     } else {
-        println!("{}", format_pretty_summary(&receipt));
-        println!("📜 Receipt written to {}", target_receipt_path.display());
+        if args.json {
+            println!("{json_receipt}");
+        } else {
+            println!("{}", format_pretty_summary(&receipt));
+            println!("📜 Receipt written to {}", target_receipt_path.display());
+        }
     }
 
     let code: u8 = match receipt.verdict {
@@ -395,6 +436,38 @@ mod tests {
         let resolved = cli.resolve();
         assert_eq!(resolved.workspace, PathBuf::from("/tmp/demo"));
         assert_eq!(resolved.task_id.as_deref(), Some("t-1"));
+        assert!(!resolved.review_pack);
+    }
+
+    #[test]
+    fn test_cli_review_pack_subcommand_parsing() {
+        let args = vec![
+            "k0maru-verifier",
+            "review-pack",
+            "--workspace",
+            "/tmp/demo-rp",
+            "--task-id",
+            "rp-1",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse review-pack subcommand");
+        let resolved = cli.resolve();
+        assert_eq!(resolved.workspace, PathBuf::from("/tmp/demo-rp"));
+        assert_eq!(resolved.task_id.as_deref(), Some("rp-1"));
+        assert!(resolved.review_pack);
+    }
+
+    #[test]
+    fn test_cli_review_pack_flag_parsing() {
+        let args = vec![
+            "k0maru-verifier",
+            "--review-pack",
+            "--workspace",
+            "/tmp/demo-flag",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse review-pack flag");
+        let resolved = cli.resolve();
+        assert!(resolved.review_pack);
+        assert_eq!(resolved.workspace, PathBuf::from("/tmp/demo-flag"));
     }
 
     #[test]
@@ -418,6 +491,7 @@ mod tests {
             Some(vec!["src/".to_string(), "tests/".to_string()])
         );
         assert!(resolved.json);
+        assert!(!resolved.review_pack);
     }
 
     #[test]
@@ -432,6 +506,7 @@ mod tests {
             spec: Some(PathBuf::from("spec.json")),
             base_branch: Some("main".to_string()),
             immutable_tests: true,
+            review_pack: true,
         };
 
         // When sub is default, all values fall back to root
@@ -446,6 +521,7 @@ mod tests {
         assert_eq!(merged.spec, Some(PathBuf::from("spec.json")));
         assert_eq!(merged.base_branch.as_deref(), Some("main"));
         assert!(merged.immutable_tests);
+        assert!(merged.review_pack);
 
         // When sub provides explicit values, they take precedence
         let sub_explicit = VerifyArgs {
@@ -461,6 +537,7 @@ mod tests {
         assert_eq!(merged_explicit.whitelist, Some(vec!["src/".to_string()]));
         assert_eq!(merged_explicit.base_branch.as_deref(), Some("main"));
         assert!(merged_explicit.immutable_tests);
+        assert!(merged_explicit.review_pack);
     }
 
     #[test]
