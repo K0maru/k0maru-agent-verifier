@@ -60,6 +60,7 @@ flowchart TD
 | **Phase 1** | **确定性基线与物理不变量** | 可插拔多语言测试运行器 SPI（Rust、Python、Node.js 自动检测）、真实进程退出码与标准错误截断捕获、变更范围守卫（`git diff HEAD` + `git status --porcelain`）、不可变收据签名（`agent-receipt-v1.json` 与 Git Patch SHA-256 计算）。 |
 | **Phase 2** | **差分执行基线与故障分类** | 不可变测试基线守卫（`--base-branch`、`--immutable-tests`）、防篡改删除拦截哨兵、类型化系统退出码（`EXIT_SUCCESS=0`、`EXIT_VERIFICATION_FAILED=1`、`EXIT_FATAL_ERROR=2`）、收据总线自动落盘（`resolve_receipts_dir(None)`）。 |
 | **Phase 3** | **审查协同与 ReviewPack 载荷** | 聚合载荷 `ReviewPack`（`--review-pack` 选项及 `review-pack` 子命令）、20 行以内精炼 Markdown 审计简报卡片（专为 `code-review` 与 `tuicr` 注入设计）、机器可读 `--json` ReviewPack 结构、扁平化 CLI 层级。 |
+| **Phase 4** | **增量覆盖率门禁与脆弱测试隔离** | Git Diff 新增代码行精准提取、LCOV / JSON 测试覆盖率报告解析评估、Diff 增量覆盖率阈值硬门禁（`--min-diff-coverage`）、瞬态脆弱用例重试与自动隔离标记机制（`--flaky-retry`）、收据与 ReviewPack 载荷全链路覆盖率与隔离透出。 |
 
 ---
 
@@ -114,6 +115,7 @@ k0maru-verifier \
 | `review-pack` | — | 执行完整验证，通过后生成供后续审阅消费的 `ReviewPack`。 | `k0maru-verifier review-pack --task-id task_01` |
 | `baseline` | — | 自动开启防篡改模式，强制检查现有测试断言是否被删减。 | `k0maru-verifier baseline --base-branch main` |
 | `diff` | — | 聚焦工作区修改范围与白名单校验，输出精简 Diff 统计。 | `k0maru-verifier diff --whitelist "src/**"` |
+| `diff-coverage` | — | 针对 LCOV 或 JSON 覆盖率报告评估增量覆盖率并实施阈值硬门禁。 | `k0maru-verifier diff-coverage --min-diff-coverage 80.0` |
 
 ### 3. ReviewPack 审查载荷生成 (Phase 3)
 
@@ -142,31 +144,58 @@ k0maru-verifier --base-branch main --immutable-tests --task-id task_bugfix_42
 ⚠️  Scope Guard message: Anti-tampering violation: deletions detected in existing test baseline
 ```
 
-### 5. CLI 参数完整速查
+### 5. 增量覆盖率门禁与脆弱测试隔离 (Phase 4)
+
+#### 增量覆盖率硬门禁 (`--min-diff-coverage`, `--coverage-file`)
+严格确保智能体在 Git Diff 中新增的代码行具备测试覆盖，原生支持 LCOV (`lcov.info`) 与 JSON (`coverage.json`) 格式报告：
+```bash
+# 强制要求新增代码行覆盖率达到 80%（自动扫描覆盖率报告）
+k0maru-verifier --min-diff-coverage 80.0
+
+# 显式指定覆盖率报告文件与子命令
+k0maru-verifier diff-coverage --coverage-file coverage/lcov.info --min-diff-coverage 85.0
+```
+*若新增代码行覆盖率低于设定阈值，验证直接硬拦截失败并输出单文件明细：*
+```text
+❌ Diff coverage 66.7% below required threshold 80.0% (4/6 new lines covered)
+```
+
+#### 脆弱测试自动重试与隔离标记 (`--flaky-retry`)
+针对分布式网络抖动、并发时序竞争等瞬态脆弱用例（Flaky Test），拦截测试失败并在上限 `N` 次内发起物理重试。若重试成功，测试被标记为已隔离通过（`flaky_quarantined: true`），既避免脆弱测试破坏自动化流转，又在电子收据与 ReviewPack 中诚实留痕：
+```bash
+# 遇到测试失败时，最多物理重试 2 次
+k0maru-verifier --flaky-retry 2
+```
+
+### 6. CLI 参数完整速查
 
 ```text
 Usage: k0maru-verifier [OPTIONS] [COMMAND]
 
 Commands:
-  verify       Verify workspace quality gates and produce an execution receipt (alias: run)
-  review-pack  Verify workspace quality gates and generate a ReviewPack for review integration
-  baseline     Verify workspace quality gates enforcing immutable test baseline protection
-  diff         Verify workspace quality gates with scope guard and diff inspection
-  help         Print this message or the help of the given subcommand(s)
+  verify         Verify workspace quality gates and produce an execution receipt (alias: run)
+  review-pack    Verify workspace quality gates and generate a ReviewPack for review integration
+  baseline       Verify workspace quality gates enforcing immutable test baseline protection
+  diff           Verify workspace quality gates with scope guard and diff inspection
+  diff-coverage  Evaluate diff coverage against coverage report and enforce threshold
+  help           Print this message or the help of the given subcommand(s)
 
 Options:
-      --workspace <WORKSPACE>      目标验证工作区路径 [默认: .]
-      --task-id <TASK_ID>          任务唯一标识，用于跨模块链路串联
-      --whitelist <WHITELIST>      允许变更的文件或目录白名单（逗号分隔或通配符）
-      --out <OUT>                  显式指定签署收据写入的绝对文件路径
-      --json                       在标准输出打印机器可读的 JSON 载荷
-      --runner <RUNNER>            强制显式指定语言运行器 (cargo, pytest, npm)
-      --spec <SPEC>                从声明式 JSON 任务规范文件中加载参数
-      --base-branch <BASE_BRANCH>  用于不可变基线对比的分支名 (如 main, dev)
-      --immutable-tests            开启测试基线防篡改物理保护（严禁删减现有测试）
-      --review-pack                生成供下游审阅消费的 ReviewPack 审计载荷与简报
-  -h, --help                       打印帮助信息
-  -V, --version                    打印版本号
+      --workspace <WORKSPACE>          目标验证工作区路径 [默认: .]
+      --task-id <TASK_ID>              任务唯一标识，用于跨模块链路串联
+      --whitelist <WHITELIST>          允许变更的文件或目录白名单（逗号分隔或通配符）
+      --out <OUT>                      显式指定签署收据写入的绝对文件路径
+      --json                           在标准输出打印机器可读的 JSON 载荷
+      --runner <RUNNER>                强制显式指定语言运行器 (cargo, pytest, npm)
+      --spec <SPEC>                    从声明式 JSON 任务规范文件中加载参数
+      --base-branch <BASE_BRANCH>      用于不可变基线对比的分支名 (如 main, dev)
+      --immutable-tests                开启测试基线防篡改物理保护（严禁删减现有测试）
+      --review-pack                    生成供下游审阅消费的 ReviewPack 审计载荷与简报
+      --min-diff-coverage <PCT>        强制要求 Git Diff 新增代码行满足最低覆盖率百分比
+      --coverage-file <PATH>           指定覆盖率报告文件路径 (LCOV 或 JSON，缺省时自动扫描)
+      --flaky-retry <N>                脆弱测试最大重试次数 (遇失败在上限内重试，成功即标记隔离)
+  -h, --help                           打印帮助信息
+  -V, --version                        打印版本号
 ```
 
 ---
@@ -249,7 +278,7 @@ tests/lib_test.rs | 6 ++
 本项目严格践行 [`AGENTS.md`](AGENTS.md) 中声明的工程宪法，保证所有流水线与质量守卫 100% 绿灯：
 
 ```bash
-# 1. 运行完整单元测试与集成测试套件（140+ 测试用例，耗时 <2.0s）
+# 1. 运行完整单元测试与集成测试套件（155 测试用例，耗时 <2.0s）
 cargo test
 
 # 2. 零 Warning 严苛 Clippy 检查

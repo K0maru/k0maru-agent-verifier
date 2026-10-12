@@ -169,6 +169,25 @@ pub fn format_markdown_summary(
         StepStatus::Skipped => "skipped".to_string(),
     };
 
+    let test_flaky_suffix = if receipt.checks.tests.flaky_quarantined == Some(true) {
+        format!(
+            " [quarantined retry #{}]",
+            receipt.checks.tests.retries.unwrap_or(1)
+        )
+    } else {
+        String::new()
+    };
+    let tests = format!("{}{}", tests, test_flaky_suffix);
+
+    let cov_summary = match &receipt.checks.diff_coverage {
+        Some(c) => format!(
+            " | Diff Coverage: {} ({:.1}%)",
+            c.status,
+            c.coverage_pct.unwrap_or(0.0)
+        ),
+        None => String::new(),
+    };
+
     let lint = match receipt.checks.linter.status {
         StepStatus::Passed => "passed (0 warnings)".to_string(),
         StepStatus::Failed => format!("failed ({} warnings)", receipt.checks.linter.warnings),
@@ -234,7 +253,7 @@ pub fn format_markdown_summary(
     format!(
         "### ⚖️ Review Pack: {}\n\
         - **Verdict**: {}\n\
-        - **Checks**: Compilation: {} | Tests: {} | Linter: {} | Scope Guard: {}\n\
+        - **Checks**: Compilation: {} | Tests: {} | Linter: {} | Scope Guard: {}{}\n\
         - **Git Patch SHA-256**: `{}`\n\
         - **Changed Files ({})**: {}\n\n\
         ```text\n\
@@ -246,6 +265,7 @@ pub fn format_markdown_summary(
         tests,
         lint,
         scope,
+        cov_summary,
         patch_sha,
         changed_files.len(),
         changed_files_preview,
@@ -278,6 +298,8 @@ mod tests {
                     failed: 0,
                     duration_ms: Some(150),
                     message: None,
+                    flaky_quarantined: None,
+                    retries: None,
                 },
                 linter: LinterCheck {
                     status: StepStatus::Passed,
@@ -295,6 +317,7 @@ mod tests {
                     unauthorized_files: Vec::new(),
                     message: None,
                 },
+                diff_coverage: None,
             },
             artifacts: ArtifactSummary {
                 git_patch_sha256: Some(

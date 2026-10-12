@@ -100,6 +100,8 @@ fn passing_mock_runner() -> TestMockRunner {
             failed: 0,
             duration_ms: Some(150),
             message: None,
+            flaky_quarantined: None,
+            retries: None,
         },
         linter: LinterCheck {
             status: StepStatus::Passed,
@@ -162,6 +164,8 @@ async fn test_verify_failure_when_test_fails() {
         failed: 3,
         duration_ms: Some(210),
         message: Some("3 tests failed: test_a, test_b, test_c".to_string()),
+        flaky_quarantined: None,
+        retries: None,
     };
 
     let mut registry = RunnerRegistry::empty();

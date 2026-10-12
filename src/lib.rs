@@ -1,6 +1,7 @@
 //! K0maru Agent Verifier: Deterministic quality gate and execution receipt signing engine.
 
 pub mod constants;
+pub mod coverage;
 pub mod error;
 pub mod guard;
 pub mod receipt;
@@ -9,12 +10,13 @@ pub mod runner;
 pub mod verifier;
 
 pub use constants::*;
+pub use coverage::{CoverageReport, DiffCoverageResult, FileDiffLines};
 pub use error::VerifierError;
 pub use guard::ScopeGuard;
 pub use receipt::{
-    resolve_receipts_dir, CheckSummary, CompilationCheck, ExecutionReceipt, LinterCheck,
-    ScopeGuardCheck, ScopeGuardResult, StepResult, StepStatus, TestCheck, TestStepResult,
-    VerdictStatus,
+    resolve_receipts_dir, CheckSummary, CompilationCheck, DiffCoverageCheck, ExecutionReceipt,
+    LinterCheck, ScopeGuardCheck, ScopeGuardResult, StepResult, StepStatus, TestCheck,
+    TestStepResult, VerdictStatus,
 };
 pub use review::ReviewPack;
 pub use runner::{LanguageRunner, RunnerRegistry};

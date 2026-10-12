@@ -60,6 +60,7 @@ flowchart TD
 | **Phase 1** | **Deterministic Baseline & Physical Invariants** | Pluggable Multi-Language Runner SPI (Rust, Python, Node.js), process exit code interception, Scope Guard (`git diff HEAD` + `git status --porcelain`), cryptographic receipt signing (`agent-receipt-v1.json` with Git Patch SHA-256). |
 | **Phase 2** | **Differential Baseline & Failure Classification** | Immutable Test Baseline Guard (`--base-branch`, `--immutable-tests`), anti-tampering deletion gate, typed exit codes (`EXIT_SUCCESS=0`, `EXIT_VERIFICATION_FAILED=1`, `EXIT_FATAL_ERROR=2`), auto-persistence to standard receipt bus (`resolve_receipts_dir(None)`). |
 | **Phase 3** | **Review Synergy & ReviewPack Payload** | Consolidated `ReviewPack` generation (`--review-pack`, `review-pack` subcommand), concise Markdown executive summary (<20 lines) for `code-review` / `tuicr`, machine-readable `--json` ReviewPack payload, flattened CLI hierarchy. |
+| **Phase 4** | **Diff Coverage Gate & Flaky Test Quarantine** | Unified Git diff added lines parsing, LCOV / JSON coverage report evaluation, diff coverage threshold enforcement (`--min-diff-coverage`), transient flaky test retry & quarantine mechanism (`--flaky-retry`), enriched execution receipts with diff coverage breakdown & quarantine indicators. |
 
 ---
 
@@ -114,6 +115,7 @@ k0maru-verifier \
 | `review-pack` | — | Executes verification and produces a `ReviewPack` markdown summary or JSON payload. | `k0maru-verifier review-pack --task-id task_01` |
 | `baseline` | — | Enforces immutable test baseline protection against deletions relative to a base branch. | `k0maru-verifier baseline --base-branch main` |
 | `diff` | — | Focuses on scope guard whitelist matching and diff statistics. | `k0maru-verifier diff --whitelist "src/**"` |
+| `diff-coverage` | — | Evaluates diff coverage against LCOV or JSON reports and enforces threshold. | `k0maru-verifier diff-coverage --min-diff-coverage 80.0` |
 
 ### 3. ReviewPack Generation (Phase 3)
 
@@ -142,31 +144,58 @@ k0maru-verifier --base-branch main --immutable-tests --task-id task_bugfix_42
 ⚠️  Scope Guard message: Anti-tampering violation: deletions detected in existing test baseline
 ```
 
-### 5. CLI Options Reference
+### 5. Diff Coverage Gate & Flaky Test Quarantine (Phase 4)
+
+#### Diff Coverage Gate (`--min-diff-coverage`, `--coverage-file`)
+Ensures newly added code lines in git diff are covered by tests according to LCOV (`lcov.info`) or JSON (`coverage.json`) reports:
+```bash
+# Enforce 80% coverage on new diff lines with auto-detected coverage report
+k0maru-verifier --min-diff-coverage 80.0
+
+# Explicit coverage file path and diff-coverage subcommand
+k0maru-verifier diff-coverage --coverage-file coverage/lcov.info --min-diff-coverage 85.0
+```
+*If diff coverage falls below threshold, verification is rejected with per-file and total statistics:*
+```text
+❌ Diff coverage 66.7% below required threshold 80.0% (4/6 new lines covered)
+```
+
+#### Flaky Test Quarantine (`--flaky-retry`)
+Intercepts transient failures (e.g., race conditions, network flakiness, timing jitters). If a test suite fails initially, it retries up to `N` times. If it passes on retry, the test check is marked as passed with `flaky_quarantined: true`, avoiding brittle build breaks while flagging flakiness in the receipt and review summary:
+```bash
+# Retry failed tests up to 2 times before failing
+k0maru-verifier --flaky-retry 2
+```
+
+### 6. CLI Options Reference
 
 ```text
 Usage: k0maru-verifier [OPTIONS] [COMMAND]
 
 Commands:
-  verify       Verify workspace quality gates and produce an execution receipt (alias: run)
-  review-pack  Verify workspace quality gates and generate a ReviewPack for review integration
-  baseline     Verify workspace quality gates enforcing immutable test baseline protection
-  diff         Verify workspace quality gates with scope guard and diff inspection
-  help         Print this message or the help of the given subcommand(s)
+  verify         Verify workspace quality gates and produce an execution receipt (alias: run)
+  review-pack    Verify workspace quality gates and generate a ReviewPack for review integration
+  baseline       Verify workspace quality gates enforcing immutable test baseline protection
+  diff           Verify workspace quality gates with scope guard and diff inspection
+  diff-coverage  Evaluate diff coverage against coverage report and enforce threshold
+  help           Print this message or the help of the given subcommand(s)
 
 Options:
-      --workspace <WORKSPACE>      Target workspace directory to verify [default: .]
-      --task-id <TASK_ID>          Unique task identifier for correlation
-      --whitelist <WHITELIST>      Allowed file paths or prefixes whitelist (comma-separated)
-      --out <OUT>                  File path to write the signed receipt JSON output
-      --json                       Emit machine-readable execution receipt JSON to stdout
-      --runner <RUNNER>            Explicitly override language runner (e.g. cargo, pytest, npm)
-      --spec <SPEC>                Path to a JSON specification file containing task parameters
-      --base-branch <BASE_BRANCH>  Base branch for immutable test baseline comparison (e.g. main, dev)
-      --immutable-tests            Protect existing tests from line deletions against base branch
-      --review-pack                Generate a ReviewPack executive summary and payload for review integration
-  -h, --help                       Print help
-  -V, --version                    Print version
+      --workspace <WORKSPACE>          Target workspace directory to verify [default: .]
+      --task-id <TASK_ID>              Unique task identifier for correlation
+      --whitelist <WHITELIST>          Allowed file paths or prefixes whitelist (comma-separated)
+      --out <OUT>                      File path to write the signed receipt JSON output
+      --json                           Emit machine-readable execution receipt JSON to stdout
+      --runner <RUNNER>                Explicitly override language runner (e.g. cargo, pytest, npm)
+      --spec <SPEC>                    Path to a JSON specification file containing task parameters
+      --base-branch <BASE_BRANCH>      Base branch for immutable test baseline comparison (e.g. main, dev)
+      --immutable-tests                Protect existing tests from line deletions against base branch
+      --review-pack                    Generate a ReviewPack executive summary and payload for review integration
+      --min-diff-coverage <PCT>        Enforce minimum coverage percentage on added diff lines
+      --coverage-file <PATH>           Path to coverage report (LCOV or JSON, auto-detected if omitted)
+      --flaky-retry <N>                Retry flaky tests up to N times before failing
+  -h, --help                           Print help
+  -V, --version                        Print version
 ```
 
 ---
@@ -249,7 +278,7 @@ tests/lib_test.rs | 6 ++
 The codebase strictly adheres to the engineering constitution outlined in [`AGENTS.md`](AGENTS.md):
 
 ```bash
-# 1. Run all unit and integration tests (140+ tests, <2.0s)
+# 1. Run all unit and integration tests (155 tests, <2.0s)
 cargo test
 
 # 2. Zero-warning clippy gate
