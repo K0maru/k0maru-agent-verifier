@@ -39,6 +39,7 @@ fn sample_passing_receipt() -> ExecutionReceipt {
                     "tests/test_receipt.rs".to_string(),
                 ],
                 unauthorized_files: Vec::new(),
+                message: None,
             },
         },
         artifacts: ArtifactSummary {
@@ -287,6 +288,7 @@ fn test_scope_guard_check_is_passed() {
         status: StepStatus::Passed,
         modified_files: vec!["src/lib.rs".to_string()],
         unauthorized_files: Vec::new(),
+        message: None,
     };
     assert!(passed.is_passed());
 
@@ -294,6 +296,7 @@ fn test_scope_guard_check_is_passed() {
         status: StepStatus::Passed,
         modified_files: vec!["src/lib.rs".to_string(), "bad.key".to_string()],
         unauthorized_files: vec!["bad.key".to_string()],
+        message: None,
     };
     assert!(!unauthorized.is_passed());
 
@@ -301,6 +304,7 @@ fn test_scope_guard_check_is_passed() {
         status: StepStatus::Skipped,
         modified_files: Vec::new(),
         unauthorized_files: Vec::new(),
+        message: None,
     };
     assert!(!skipped.is_passed());
 }
@@ -743,4 +747,36 @@ fn test_summary_and_display_formatting() {
     assert!(fail_summary.contains("tests: failed (3/42 failed"));
     assert!(fail_summary.contains("patch sha256: <none>"));
     assert!(fail_summary.contains("timestamp: <none>"));
+}
+
+#[test]
+fn test_resolve_receipts_dir_hierarchy() {
+    use k0maru_verifier::receipt::resolve_receipts_dir;
+    use std::path::{Path, PathBuf};
+
+    // 1. Explicit override directory takes highest priority
+    let custom = Path::new("/custom/receipts/dir");
+    assert_eq!(
+        resolve_receipts_dir(Some(custom)),
+        PathBuf::from("/custom/receipts/dir")
+    );
+
+    // 2. K0MARU_RECEIPT_DIR env var takes second priority
+    std::env::set_var("K0MARU_RECEIPT_DIR", "/env/receipts/dir");
+    assert_eq!(
+        resolve_receipts_dir(None),
+        PathBuf::from("/env/receipts/dir")
+    );
+
+    // Empty env var should fall through to default
+    std::env::set_var("K0MARU_RECEIPT_DIR", "   ");
+    let fallback = resolve_receipts_dir(None);
+    assert!(fallback.ends_with(".k0maru/receipts") || fallback.ends_with(".k0maru\\receipts"));
+
+    // Clean up env
+    std::env::remove_var("K0MARU_RECEIPT_DIR");
+    let default_dir = resolve_receipts_dir(None);
+    assert!(
+        default_dir.ends_with(".k0maru/receipts") || default_dir.ends_with(".k0maru\\receipts")
+    );
 }

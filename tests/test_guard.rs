@@ -390,3 +390,151 @@ async fn test_git_repo_deleted_file() {
     assert!(!check_unauth.is_passed());
     assert_eq!(check_unauth.unauthorized_files, vec!["Cargo.toml"]);
 }
+
+#[tokio::test]
+async fn test_git_immutable_test_baseline_guard_passes_on_additions() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git execution");
+        assert!(output.status.success());
+    };
+
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.name", "Tester"]);
+    run_git(&["config", "user.email", "tester@example.com"]);
+
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("tests/test_math.rs"),
+        "#[test]\nfn test_add() {\n    assert_eq!(2 + 2, 4);\n}\n",
+    )
+    .unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "init test baseline"]);
+
+    // Create feature branch
+    run_git(&["checkout", "-b", "feat/more-tests"]);
+
+    // Agent adds a new test function to existing test file (pure additions)
+    std::fs::write(
+        root.join("tests/test_math.rs"),
+        "#[test]\nfn test_add() {\n    assert_eq!(2 + 2, 4);\n}\n\n#[test]\nfn test_sub() {\n    assert_eq!(4 - 2, 2);\n}\n",
+    )
+    .unwrap();
+
+    // Agent adds a brand new test file
+    std::fs::write(
+        root.join("tests/test_new.rs"),
+        "#[test]\nfn test_brand_new() {}\n",
+    )
+    .unwrap();
+
+    let check = ScopeGuard::check_scope_extended(root, None, Some("main"), true)
+        .await
+        .expect("check_scope_extended succeeds");
+
+    assert_eq!(check.status, StepStatus::Passed);
+    assert!(check.message.is_none());
+}
+
+#[tokio::test]
+async fn test_git_immutable_test_baseline_guard_fails_on_deletions() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git execution");
+        assert!(output.status.success());
+    };
+
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.name", "Tester"]);
+    run_git(&["config", "user.email", "tester@example.com"]);
+
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("tests/test_auth.rs"),
+        "#[test]\nfn test_jwt() {\n    assert!(true);\n    assert_eq!(1, 1);\n}\n",
+    )
+    .unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "baseline with tests"]);
+
+    run_git(&["checkout", "-b", "feat/bypass"]);
+
+    // Rogue edit: deleting the assertion from existing test baseline!
+    std::fs::write(
+        root.join("tests/test_auth.rs"),
+        "#[test]\nfn test_jwt() {\n    assert!(true);\n}\n",
+    )
+    .unwrap();
+
+    let check = ScopeGuard::check_scope_extended(root, None, Some("main"), true)
+        .await
+        .expect("check_scope_extended succeeds");
+
+    assert_eq!(check.status, StepStatus::Failed);
+    assert!(!check.is_passed());
+    let msg = check.message.expect("tampering message must be set");
+    assert!(
+        msg.contains("Anti-tampering violation: deletions detected in existing test baseline"),
+        "Message was: {msg}"
+    );
+    assert!(msg.contains("tests/test_auth.rs"));
+}
+
+#[tokio::test]
+async fn test_git_immutable_test_baseline_guard_fails_on_file_deletion() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+
+    let run_git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git execution");
+        assert!(output.status.success());
+    };
+
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.name", "Tester"]);
+    run_git(&["config", "user.email", "tester@example.com"]);
+
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("tests/test_critical.rs"),
+        "#[test]\nfn test_critical() {}\n",
+    )
+    .unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "baseline with critical test"]);
+
+    run_git(&["checkout", "-b", "feat/remove-file"]);
+
+    // Rogue edit: deleting the entire critical test file!
+    std::fs::remove_file(root.join("tests/test_critical.rs")).unwrap();
+
+    let check = ScopeGuard::check_scope_extended(root, None, Some("main"), true)
+        .await
+        .expect("check_scope_extended succeeds");
+
+    assert_eq!(check.status, StepStatus::Failed);
+    assert!(!check.is_passed());
+    let msg = check.message.expect("tampering message must be set");
+    assert!(
+        msg.contains("Anti-tampering violation: deletions detected in existing test baseline"),
+        "Message was: {msg}"
+    );
+    assert!(msg.contains("tests/test_critical.rs"));
+}

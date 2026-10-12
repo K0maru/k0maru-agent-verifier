@@ -190,12 +190,37 @@ pub struct ScopeGuardCheck {
     pub modified_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unauthorized_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 impl ScopeGuardCheck {
     pub fn is_passed(&self) -> bool {
         self.status.is_passed() && self.unauthorized_files.is_empty()
     }
+}
+
+/// Resolves the standardized receipts storage directory.
+/// Precedence:
+/// 1. Explicitly provided `override_dir`
+/// 2. `K0MARU_RECEIPT_DIR` environment variable
+/// 3. Standard fallback: `~/.k0maru/receipts`
+pub fn resolve_receipts_dir(override_dir: Option<&std::path::Path>) -> PathBuf {
+    if let Some(dir) = override_dir {
+        return dir.to_path_buf();
+    }
+    if let Ok(env_val) = std::env::var(crate::constants::ENV_K0MARU_RECEIPT_DIR) {
+        let trimmed = env_val.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(crate::constants::DEFAULT_K0MARU_DIR)
+        .join(crate::constants::DEFAULT_RECEIPTS_SUBDIR)
 }
 
 /// Backward compatibility aliases.
@@ -516,6 +541,7 @@ mod tests {
                     status: StepStatus::Passed,
                     modified_files: vec!["src/lib.rs".to_string()],
                     unauthorized_files: Vec::new(),
+                    message: None,
                 },
             },
             artifacts: ArtifactSummary {
@@ -720,6 +746,7 @@ mod tests {
             status: StepStatus::Passed,
             modified_files: vec!["foo.rs".into()],
             unauthorized_files: vec![],
+            message: None,
         };
         assert!(scope_pass.is_passed());
 
@@ -727,6 +754,7 @@ mod tests {
             status: StepStatus::Passed,
             modified_files: vec!["foo.rs".into()],
             unauthorized_files: vec!["bar.rs".into()],
+            message: None,
         };
         assert!(!scope_fail.is_passed());
     }
@@ -754,6 +782,7 @@ mod tests {
             status: StepStatus::Passed,
             modified_files: vec![],
             unauthorized_files: vec![],
+            message: None,
         };
         assert!(g.is_passed());
     }

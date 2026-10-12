@@ -22,6 +22,10 @@ pub struct VerifierConfig {
     pub override_runner: Option<String>,
     /// Whether to auto-detect runner if override is not provided (default: true).
     pub auto_detect: bool,
+    /// Base branch for immutable test baseline comparison (e.g. "main", "dev").
+    pub base_branch: Option<String>,
+    /// Whether to enforce immutable test protection preventing deletion of existing test lines.
+    pub immutable_tests: bool,
 }
 
 impl VerifierConfig {
@@ -33,6 +37,8 @@ impl VerifierConfig {
             whitelist: None,
             override_runner: None,
             auto_detect: true,
+            base_branch: None,
+            immutable_tests: false,
         }
     }
 
@@ -65,6 +71,18 @@ impl VerifierConfig {
         self.auto_detect = auto_detect;
         self
     }
+
+    /// Sets the base branch for immutable test protection.
+    pub fn base_branch(mut self, base_branch: impl Into<Option<String>>) -> Self {
+        self.base_branch = base_branch.into();
+        self
+    }
+
+    /// Enables or disables immutable test baseline protection.
+    pub fn immutable_tests(mut self, immutable_tests: bool) -> Self {
+        self.immutable_tests = immutable_tests;
+        self
+    }
 }
 
 impl Default for VerifierConfig {
@@ -75,6 +93,8 @@ impl Default for VerifierConfig {
             whitelist: None,
             override_runner: None,
             auto_detect: true,
+            base_branch: None,
+            immutable_tests: false,
         }
     }
 }
@@ -186,19 +206,26 @@ impl WorkspaceVerifier {
         };
 
         // 5. Scope Guard check
-        let scope_guard =
-            match ScopeGuard::check_scope(&workspace, config.whitelist.as_deref()).await {
-                Ok(check) => check,
-                Err(VerifierError::GitError(err)) => {
-                    is_blocked = true;
-                    ScopeGuardCheck {
-                        status: StepStatus::Skipped,
-                        modified_files: Vec::new(),
-                        unauthorized_files: vec![format!("Git error: {err}")],
-                    }
+        let scope_guard = match ScopeGuard::check_scope_extended(
+            &workspace,
+            config.whitelist.as_deref(),
+            config.base_branch.as_deref(),
+            config.immutable_tests,
+        )
+        .await
+        {
+            Ok(check) => check,
+            Err(VerifierError::GitError(err)) => {
+                is_blocked = true;
+                ScopeGuardCheck {
+                    status: StepStatus::Skipped,
+                    modified_files: Vec::new(),
+                    unauthorized_files: vec![format!("Git error: {err}")],
+                    message: Some(format!("Git error: {err}")),
                 }
-                Err(e) => return Err(e),
-            };
+            }
+            Err(e) => return Err(e),
+        };
 
         // 6. Compute Git Patch SHA-256 fingerprint
         let git_patch_sha256 = compute_git_diff_sha256(&workspace).await;

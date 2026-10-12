@@ -59,6 +59,14 @@ pub struct VerifyArgs {
     /// Path to a JSON specification file containing task parameters
     #[arg(long)]
     pub spec: Option<PathBuf>,
+
+    /// Base branch for immutable test baseline comparison (e.g. main, dev)
+    #[arg(long)]
+    pub base_branch: Option<String>,
+
+    /// Protect existing tests from line deletions against base branch
+    #[arg(long)]
+    pub immutable_tests: bool,
 }
 
 impl VerifyArgs {
@@ -88,6 +96,10 @@ impl VerifyArgs {
         if self.spec.is_none() {
             self.spec = fallback.spec;
         }
+        if self.base_branch.is_none() {
+            self.base_branch = fallback.base_branch;
+        }
+        self.immutable_tests = self.immutable_tests || fallback.immutable_tests;
         self
     }
 }
@@ -110,6 +122,8 @@ pub struct TaskSpec {
     pub whitelist: Option<Vec<String>>,
     pub allowed_files: Option<Vec<String>>,
     pub runner: Option<String>,
+    pub base_branch: Option<String>,
+    pub immutable_tests: Option<bool>,
 }
 
 /// Merges command-line arguments with an optional specification file.
@@ -117,14 +131,14 @@ pub fn merge_args_with_spec(args: &VerifyArgs) -> Result<VerifierConfig, i32> {
     let spec = if let Some(ref spec_path) = args.spec {
         let content = std::fs::read_to_string(spec_path).map_err(|e| {
             eprintln!("❌ Failed to read spec file '{}': {e}", spec_path.display());
-            2
+            k0maru_verifier::constants::EXIT_FATAL_ERROR
         })?;
         let parsed: TaskSpec = serde_json::from_str(&content).map_err(|e| {
             eprintln!(
                 "❌ Failed to parse spec file JSON '{}': {e}",
                 spec_path.display()
             );
-            2
+            k0maru_verifier::constants::EXIT_FATAL_ERROR
         })?;
         Some(parsed)
     } else {
@@ -164,9 +178,22 @@ pub fn merge_args_with_spec(args: &VerifyArgs) -> Result<VerifierConfig, i32> {
         .clone()
         .or_else(|| spec.as_ref().and_then(|s| s.runner.clone()));
 
+    let base_branch = args
+        .base_branch
+        .clone()
+        .or_else(|| spec.as_ref().and_then(|s| s.base_branch.clone()));
+
+    let immutable_tests = args.immutable_tests
+        || spec
+            .as_ref()
+            .and_then(|s| s.immutable_tests)
+            .unwrap_or(false);
+
     Ok(VerifierConfig::new(workspace, task_id)
         .whitelist(whitelist)
         .override_runner(override_runner)
+        .base_branch(base_branch)
+        .immutable_tests(immutable_tests)
         .auto_detect(true))
 }
 
@@ -266,6 +293,10 @@ pub fn format_pretty_summary(receipt: &ExecutionReceipt) -> String {
         timestamp,
     );
 
+    if let Some(ref msg) = receipt.checks.scope_guard.message {
+        out.push_str(&format!("\n⚠️  Scope Guard message: {msg}\n"));
+    }
+
     if !receipt.checks.scope_guard.unauthorized_files.is_empty() {
         out.push_str("\n🚨 Unauthorized modified files detected:\n");
         for f in &receipt.checks.scope_guard.unauthorized_files {
@@ -291,7 +322,7 @@ async fn main() -> ExitCode {
         Ok(r) => r,
         Err(e) => {
             eprintln!("❌ Fatal verification error: {e}");
-            return ExitCode::from(2);
+            return ExitCode::from(k0maru_verifier::constants::EXIT_FATAL_ERROR as u8);
         }
     };
 
@@ -299,33 +330,46 @@ async fn main() -> ExitCode {
         Ok(j) => j,
         Err(e) => {
             eprintln!("❌ Failed to serialize execution receipt: {e}");
-            return ExitCode::from(2);
+            return ExitCode::from(k0maru_verifier::constants::EXIT_FATAL_ERROR as u8);
         }
     };
+
+    let target_receipt_path = if let Some(ref out_path) = args.out {
+        out_path.clone()
+    } else {
+        let receipts_dir = k0maru_verifier::receipt::resolve_receipts_dir(None);
+        receipts_dir.join(format!("{}.json", receipt.task_id))
+    };
+
+    if let Some(parent) = target_receipt_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "❌ Failed to create receipt directory '{}': {e}",
+                parent.display()
+            );
+            return ExitCode::from(k0maru_verifier::constants::EXIT_FATAL_ERROR as u8);
+        }
+    }
+
+    if let Err(e) = std::fs::write(&target_receipt_path, &json_receipt) {
+        eprintln!(
+            "❌ Failed to write receipt to '{}': {e}",
+            target_receipt_path.display()
+        );
+        return ExitCode::from(k0maru_verifier::constants::EXIT_FATAL_ERROR as u8);
+    }
 
     if args.json {
         println!("{json_receipt}");
     } else {
         println!("{}", format_pretty_summary(&receipt));
-    }
-
-    if let Some(ref out_path) = args.out {
-        if let Err(e) = std::fs::write(out_path, &json_receipt) {
-            eprintln!(
-                "❌ Failed to write receipt to '{}': {e}",
-                out_path.display()
-            );
-            return ExitCode::from(2);
-        }
-        if !args.json {
-            println!("📜 Receipt written to {}", out_path.display());
-        }
+        println!("📜 Receipt written to {}", target_receipt_path.display());
     }
 
     let code: u8 = match receipt.verdict {
-        VerdictStatus::Success => 0,
-        VerdictStatus::Failed => 1,
-        VerdictStatus::Blocked => 2,
+        VerdictStatus::Success => k0maru_verifier::constants::EXIT_SUCCESS as u8,
+        VerdictStatus::Failed => k0maru_verifier::constants::EXIT_VERIFICATION_FAILED as u8,
+        VerdictStatus::Blocked => k0maru_verifier::constants::EXIT_FATAL_ERROR as u8,
     };
 
     ExitCode::from(code)
@@ -386,6 +430,8 @@ mod tests {
             json: true,
             runner: Some("cargo".to_string()),
             spec: Some(PathBuf::from("spec.json")),
+            base_branch: Some("main".to_string()),
+            immutable_tests: true,
         };
 
         // When sub is default, all values fall back to root
@@ -398,6 +444,8 @@ mod tests {
         assert!(merged.json);
         assert_eq!(merged.runner.as_deref(), Some("cargo"));
         assert_eq!(merged.spec, Some(PathBuf::from("spec.json")));
+        assert_eq!(merged.base_branch.as_deref(), Some("main"));
+        assert!(merged.immutable_tests);
 
         // When sub provides explicit values, they take precedence
         let sub_explicit = VerifyArgs {
@@ -411,6 +459,8 @@ mod tests {
         assert_eq!(merged_explicit.task_id.as_deref(), Some("sub-task"));
         assert!(merged_explicit.json); // json is OR'd
         assert_eq!(merged_explicit.whitelist, Some(vec!["src/".to_string()]));
+        assert_eq!(merged_explicit.base_branch.as_deref(), Some("main"));
+        assert!(merged_explicit.immutable_tests);
     }
 
     #[test]
@@ -497,6 +547,7 @@ mod tests {
                     status: StepStatus::Passed,
                     modified_files: vec!["src/main.rs".to_string()],
                     unauthorized_files: Vec::new(),
+                    message: None,
                 },
             },
             artifacts: ArtifactSummary {
