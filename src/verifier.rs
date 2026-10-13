@@ -32,6 +32,8 @@ pub struct VerifierConfig {
     pub coverage_file: Option<PathBuf>,
     /// Maximum retry attempts for transient flaky test failures.
     pub flaky_retry: usize,
+    /// Whether to enforce Popperian physical falsification on baseline code.
+    pub red_check: bool,
     /// Optional K-DSL dynamic verification directive clause.
     pub kdsl: Option<crate::kdsl::KdslVerifyClause>,
 }
@@ -50,6 +52,7 @@ impl VerifierConfig {
             min_diff_coverage: None,
             coverage_file: None,
             flaky_retry: 0,
+            red_check: false,
             kdsl: None,
         }
     }
@@ -114,6 +117,12 @@ impl VerifierConfig {
         self
     }
 
+    /// Enables or disables Popperian physical falsification on baseline.
+    pub fn red_check(mut self, red_check: bool) -> Self {
+        self.red_check = red_check;
+        self
+    }
+
     /// Sets the parsed K-DSL verification directive clause.
     pub fn kdsl(mut self, kdsl: impl Into<Option<crate::kdsl::KdslVerifyClause>>) -> Self {
         self.kdsl = kdsl.into();
@@ -134,6 +143,7 @@ impl Default for VerifierConfig {
             min_diff_coverage: None,
             coverage_file: None,
             flaky_retry: 0,
+            red_check: false,
             kdsl: None,
         }
     }
@@ -320,10 +330,28 @@ impl WorkspaceVerifier {
             None
         };
 
-        // 7. Compute Git Patch SHA-256 fingerprint
+        // 7. Popperian physical falsification check (if requested)
+        let red_check = if config.red_check
+            || config
+                .kdsl
+                .as_ref()
+                .map(|k| k.has_red_check())
+                .unwrap_or(false)
+        {
+            match selected_runner {
+                Some(runner) => Some(
+                    crate::falsification::run_red_check(&workspace, runner, base_branch).await?,
+                ),
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        // 8. Compute Git Patch SHA-256 fingerprint
         let git_patch_sha256 = compute_git_diff_sha256(&workspace).await;
 
-        // 8. Formulate Verdict
+        // 9. Formulate Verdict
         let checks_all_passed = compilation.is_passed()
             && tests.is_passed()
             && linter.is_passed()
@@ -331,7 +359,8 @@ impl WorkspaceVerifier {
             && diff_coverage
                 .as_ref()
                 .map(|c| c.is_passed())
-                .unwrap_or(true);
+                .unwrap_or(true)
+            && red_check.as_ref().map(|r| r.is_passed()).unwrap_or(true);
 
         let verdict = if is_blocked {
             VerdictStatus::Blocked
@@ -341,7 +370,7 @@ impl WorkspaceVerifier {
             VerdictStatus::Failed
         };
 
-        // 9. Build Receipt
+        // 10. Build Receipt
         let receipt = ExecutionReceipt {
             schema: DEFAULT_RECEIPT_SCHEMA.to_string(),
             task_id: config.task_id.clone(),
@@ -353,6 +382,7 @@ impl WorkspaceVerifier {
                 linter,
                 scope_guard,
                 diff_coverage,
+                red_check,
             },
             artifacts: ArtifactSummary {
                 git_patch_sha256,
@@ -360,7 +390,7 @@ impl WorkspaceVerifier {
             },
         };
 
-        // 9. Validate Receipt invariants
+        // 11. Validate Receipt invariants
         receipt.validate()?;
 
         Ok(receipt)

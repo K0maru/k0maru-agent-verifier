@@ -3,6 +3,7 @@
 pub mod constants;
 pub mod coverage;
 pub mod error;
+pub mod falsification;
 pub mod guard;
 pub mod kdsl;
 pub mod receipt;
@@ -14,12 +15,13 @@ pub mod verifier;
 pub use constants::*;
 pub use coverage::{CoverageReport, DiffCoverageResult, FileDiffLines};
 pub use error::VerifierError;
+pub use falsification::run_red_check;
 pub use guard::ScopeGuard;
 pub use kdsl::{KdslInvariant, KdslVerifyClause};
 pub use receipt::{
     resolve_receipts_dir, CheckSummary, CompilationCheck, DiffCoverageCheck, ExecutionReceipt,
-    LinterCheck, ScopeGuardCheck, ScopeGuardResult, StepResult, StepStatus, TestCheck,
-    TestStepResult, VerdictStatus,
+    LinterCheck, RedCheckResult, ScopeGuardCheck, ScopeGuardResult, StepResult, StepStatus,
+    TestCheck, TestStepResult, VerdictStatus,
 };
 pub use review::ReviewPack;
 pub use runner::{LanguageRunner, RunnerRegistry};

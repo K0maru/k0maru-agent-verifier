@@ -26,6 +26,8 @@ pub enum KdslInvariant {
     LivingAdr(Option<String>),
     /// Immutable test baseline guard with optional base branch (e.g. `IMMUTABLE_TESTS#main`, `NO_DELETIONS`).
     ImmutableTests(Option<String>),
+    /// Popperian physical falsification check ensuring tests fail on baseline (e.g. `RED_CHECK`, `FALSIFICATION`).
+    RedCheck,
     /// Custom or extension invariant.
     Custom(String),
 }
@@ -145,6 +147,13 @@ impl KdslVerifyClause {
                 None
             };
             KdslInvariant::ImmutableTests(branch)
+        } else if upper == "RED_CHECK"
+            || upper == "RED_TEST"
+            || upper == "FALSIFICATION"
+            || upper == "POPPER"
+            || upper == "POPPERIAN"
+        {
+            KdslInvariant::RedCheck
         } else {
             KdslInvariant::Custom(token.to_string())
         }
@@ -199,6 +208,13 @@ impl KdslVerifyClause {
             KdslInvariant::ImmutableTests(Some(ref b)) => Some(b.as_str()),
             _ => None,
         })
+    }
+
+    /// Whether Popperian physical falsification check is required.
+    pub fn has_red_check(&self) -> bool {
+        self.invariants
+            .iter()
+            .any(|i| matches!(i, KdslInvariant::RedCheck))
     }
 }
 

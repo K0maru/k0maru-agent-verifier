@@ -245,6 +245,28 @@ impl ScopeGuardCheck {
     }
 }
 
+/// Popperian physical falsification check result ensuring tests fail on unmodified baseline code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedCheckResult {
+    pub status: StepStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_ref: Option<String>,
+    #[serde(default)]
+    pub test_files: Vec<String>,
+    #[serde(default)]
+    pub prod_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl RedCheckResult {
+    pub fn is_passed(&self) -> bool {
+        self.status.is_passed() || self.status.is_skipped()
+    }
+}
+
 /// Resolves the standardized receipts storage directory.
 /// Precedence:
 /// 1. Explicitly provided `override_dir`
@@ -282,6 +304,8 @@ pub struct CheckSummary {
     pub scope_guard: ScopeGuardCheck,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_coverage: Option<DiffCoverageCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub red_check: Option<RedCheckResult>,
 }
 
 impl CheckSummary {
@@ -290,8 +314,13 @@ impl CheckSummary {
             && self.tests.is_passed()
             && self.linter.is_passed()
             && self.scope_guard.is_passed();
-        if let Some(ref cov) = self.diff_coverage {
+        let base = if let Some(ref cov) = self.diff_coverage {
             base && cov.is_passed()
+        } else {
+            base
+        };
+        if let Some(ref red) = self.red_check {
+            base && red.is_passed()
         } else {
             base
         }
@@ -454,6 +483,16 @@ impl ExecutionReceipt {
             }
         }
 
+        // Validate red_check check consistency if present
+        if let Some(ref red) = self.checks.red_check {
+            if red.status.is_failed() && self.verdict.is_success() {
+                return Err(VerifierError::InvalidReceipt(
+                    "Verdict is marked 'success' but red_check (Popperian falsification) failed"
+                        .to_string(),
+                ));
+            }
+        }
+
         // Validate verdict consistency
         if self.verdict.is_success() && !self.checks.is_all_passed() {
             return Err(VerifierError::InvalidReceipt(
@@ -505,6 +544,23 @@ impl ExecutionReceipt {
             ),
             None => String::new(),
         };
+        let red_line = match &self.checks.red_check {
+            Some(red) => {
+                let msg = red.message.as_deref().unwrap_or("");
+                format!(
+                    "\n    - red_check: {} (tests: {}, prod: {}){}",
+                    red.status,
+                    red.test_files.len(),
+                    red.prod_files.len(),
+                    if msg.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" - {}", msg)
+                    }
+                )
+            }
+            None => String::new(),
+        };
         let flaky_note = if self.checks.tests.flaky_quarantined == Some(true) {
             format!(
                 " [quarantined after {} retries]",
@@ -514,7 +570,7 @@ impl ExecutionReceipt {
             String::new()
         };
         format!(
-            "Receipt [{} | {}]\n  Workspace: {}\n  Verdict: {}\n  Checks:\n    - compilation: {} (exit {}){}\n    - tests: {} ({}/{} failed, duration: {}ms){}{}\n    - linter: {} ({} warnings)\n    - scope_guard: {} ({} modified, {} unauthorized)\n  Artifacts:\n    - patch sha256: {}\n    - timestamp: {}",
+            "Receipt [{} | {}]\n  Workspace: {}\n  Verdict: {}\n  Checks:\n    - compilation: {} (exit {}){}\n    - tests: {} ({}/{} failed, duration: {}ms){}{}{}\n    - linter: {} ({} warnings)\n    - scope_guard: {} ({} modified, {} unauthorized)\n  Artifacts:\n    - patch sha256: {}\n    - timestamp: {}",
             self.task_id,
             pass_status,
             self.workspace.display(),
@@ -528,6 +584,7 @@ impl ExecutionReceipt {
             self.checks.tests.duration_ms.unwrap_or(0),
             flaky_note,
             cov_line,
+            red_line,
             self.checks.linter.status,
             self.checks.linter.warnings,
             self.checks.scope_guard.status,
@@ -633,6 +690,7 @@ mod tests {
                     message: None,
                 },
                 diff_coverage: None,
+                red_check: None,
             },
             artifacts: ArtifactSummary {
                 git_patch_sha256: Some(

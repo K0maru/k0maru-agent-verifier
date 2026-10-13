@@ -44,6 +44,7 @@ fn sample_passing_receipt() -> ExecutionReceipt {
                 message: None,
             },
             diff_coverage: None,
+            red_check: None,
         },
         artifacts: ArtifactSummary {
             git_patch_sha256: Some(

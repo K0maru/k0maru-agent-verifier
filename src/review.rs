@@ -188,6 +188,16 @@ pub fn format_markdown_summary(
         None => String::new(),
     };
 
+    let red_summary = match &receipt.checks.red_check {
+        Some(r) => format!(
+            " | Red Check: {} (tests: {}, prod: {})",
+            r.status,
+            r.test_files.len(),
+            r.prod_files.len()
+        ),
+        None => String::new(),
+    };
+
     let lint = match receipt.checks.linter.status {
         StepStatus::Passed => "passed (0 warnings)".to_string(),
         StepStatus::Failed => format!("failed ({} warnings)", receipt.checks.linter.warnings),
@@ -253,7 +263,7 @@ pub fn format_markdown_summary(
     format!(
         "### ⚖️ Review Pack: {}\n\
         - **Verdict**: {}\n\
-        - **Checks**: Compilation: {} | Tests: {} | Linter: {} | Scope Guard: {}{}\n\
+        - **Checks**: Compilation: {} | Tests: {} | Linter: {} | Scope Guard: {}{}{}\n\
         - **Git Patch SHA-256**: `{}`\n\
         - **Changed Files ({})**: {}\n\n\
         ```text\n\
@@ -266,6 +276,7 @@ pub fn format_markdown_summary(
         lint,
         scope,
         cov_summary,
+        red_summary,
         patch_sha,
         changed_files.len(),
         changed_files_preview,
@@ -318,6 +329,7 @@ mod tests {
                     message: None,
                 },
                 diff_coverage: None,
+                red_check: None,
             },
             artifacts: ArtifactSummary {
                 git_patch_sha256: Some(

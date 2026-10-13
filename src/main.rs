@@ -41,6 +41,9 @@ pub enum Commands {
     #[command(name = "diff-coverage")]
     /// Verify workspace quality gates enforcing minimum diff coverage threshold
     DiffCoverage(VerifyArgs),
+    #[command(name = "red-check")]
+    /// Verify workspace quality gates enforcing Popperian physical falsification on baseline
+    RedCheck(VerifyArgs),
 }
 
 #[derive(Args, Debug, Clone, Default)]
@@ -80,6 +83,10 @@ pub struct VerifyArgs {
     /// Protect existing tests from line deletions against base branch
     #[arg(long)]
     pub immutable_tests: bool,
+
+    /// Enforce Popperian physical falsification (new tests must fail on baseline code without prod changes)
+    #[arg(long)]
+    pub red_check: bool,
 
     /// Generate a ReviewPack executive summary and payload for review integration
     #[arg(long)]
@@ -127,6 +134,7 @@ impl PartialEq for VerifyArgs {
             && self.spec == other.spec
             && self.base_branch == other.base_branch
             && self.immutable_tests == other.immutable_tests
+            && self.red_check == other.red_check
             && self.review_pack == other.review_pack
             && self.coverage_file == other.coverage_file
             && self.flaky_retry == other.flaky_retry
@@ -173,6 +181,7 @@ impl VerifyArgs {
             self.base_branch = fallback.base_branch;
         }
         self.immutable_tests = self.immutable_tests || fallback.immutable_tests;
+        self.red_check = self.red_check || fallback.red_check;
         self.review_pack = self.review_pack || fallback.review_pack;
         if self.min_diff_coverage.is_none() {
             self.min_diff_coverage = fallback.min_diff_coverage;
@@ -212,6 +221,10 @@ impl Cli {
             }
             Some(Commands::Diff(sub_args)) => sub_args.merge_fallback(self.root_args),
             Some(Commands::DiffCoverage(sub_args)) => sub_args.merge_fallback(self.root_args),
+            Some(Commands::RedCheck(mut sub_args)) => {
+                sub_args.red_check = true;
+                sub_args.merge_fallback(self.root_args)
+            }
             None => self.root_args,
         }
     }
@@ -227,6 +240,7 @@ pub struct TaskSpec {
     pub runner: Option<String>,
     pub base_branch: Option<String>,
     pub immutable_tests: Option<bool>,
+    pub red_check: Option<bool>,
     pub min_diff_coverage: Option<f64>,
     pub coverage_file: Option<String>,
     pub flaky_retry: Option<usize>,
@@ -323,6 +337,13 @@ pub fn merge_args_with_spec(args: &VerifyArgs) -> Result<VerifierConfig, i32> {
             .and_then(|s| s.immutable_tests)
             .unwrap_or(false);
 
+    let red_check = args.red_check
+        || kdsl_clause
+            .as_ref()
+            .map(|k| k.has_red_check())
+            .unwrap_or(false)
+        || spec.as_ref().and_then(|s| s.red_check).unwrap_or(false);
+
     let min_diff_coverage = args
         .min_diff_coverage
         .or_else(|| spec.as_ref().and_then(|s| s.min_diff_coverage));
@@ -343,6 +364,7 @@ pub fn merge_args_with_spec(args: &VerifyArgs) -> Result<VerifierConfig, i32> {
         .override_runner(override_runner)
         .base_branch(base_branch)
         .immutable_tests(immutable_tests)
+        .red_check(red_check)
         .min_diff_coverage(min_diff_coverage)
         .coverage_file(coverage_file)
         .flaky_retry(flaky_retry)
@@ -430,6 +452,30 @@ pub fn format_pretty_summary(receipt: &ExecutionReceipt) -> String {
         None => String::new(),
     };
 
+    let red_line = match &receipt.checks.red_check {
+        Some(red) => {
+            let icon = match red.status {
+                StepStatus::Passed => "✅",
+                StepStatus::Failed => "❌",
+                StepStatus::Skipped => "⏭️ ",
+            };
+            let msg = red.message.as_deref().unwrap_or("");
+            format!(
+                "\n    {} Red Check:     {} (tests: {}, prod: {}){}",
+                icon,
+                red.status,
+                red.test_files.len(),
+                red.prod_files.len(),
+                if msg.is_empty() {
+                    String::new()
+                } else {
+                    format!(" - {}", msg)
+                }
+            )
+        }
+        None => String::new(),
+    };
+
     let patch_sha = receipt
         .artifacts
         .git_patch_sha256
@@ -453,7 +499,7 @@ pub fn format_pretty_summary(receipt: &ExecutionReceipt) -> String {
     {} Compilation:  {}
     {} Tests:        {}
     {} Linter:       {}
-    {} Scope Guard:  {}{cov_line}
+    {} Scope Guard:  {}{cov_line}{red_line}
 ──────────────────────────────────────────────────────────────────
   Artifacts:
     📜 Git SHA-256:  {}
@@ -800,6 +846,7 @@ mod tests {
             spec: Some(PathBuf::from("spec.json")),
             base_branch: Some("main".to_string()),
             immutable_tests: true,
+            red_check: true,
             review_pack: true,
             min_diff_coverage: Some(85.0),
             coverage_file: Some(PathBuf::from("lcov.info")),
@@ -948,6 +995,7 @@ mod tests {
                     message: None,
                 },
                 diff_coverage: None,
+                red_check: None,
             },
             artifacts: ArtifactSummary {
                 git_patch_sha256: Some("abcdef1234567890".to_string()),
