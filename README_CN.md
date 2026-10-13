@@ -61,6 +61,7 @@ flowchart TD
 | **Phase 2** | **差分执行基线与故障分类** | 不可变测试基线守卫（`--base-branch`、`--immutable-tests`）、防篡改删除拦截哨兵、类型化系统退出码（`EXIT_SUCCESS=0`、`EXIT_VERIFICATION_FAILED=1`、`EXIT_FATAL_ERROR=2`）、收据总线自动落盘（`resolve_receipts_dir(None)`）。 |
 | **Phase 3** | **审查协同与 ReviewPack 载荷** | 聚合载荷 `ReviewPack`（`--review-pack` 选项及 `review-pack` 子命令）、20 行以内精炼 Markdown 审计简报卡片（专为 `code-review` 与 `tuicr` 注入设计）、机器可读 `--json` ReviewPack 结构、扁平化 CLI 层级。 |
 | **Phase 4** | **增量覆盖率门禁与脆弱测试隔离** | Git Diff 新增代码行精准提取、LCOV / JSON 测试覆盖率报告解析评估、Diff 增量覆盖率阈值硬门禁（`--min-diff-coverage`）、瞬态脆弱用例重试与自动隔离标记机制（`--flaky-retry`）、收据与 ReviewPack 载荷全链路覆盖率与隔离透出。 |
+| **Phase 5** | **波普尔式物理证伪** | 消除假绿用例证伪门禁（`--red-check` 与 `red-check` 子命令）。通过内存级 RAII 守卫瞬态将业务代码安全回滚至 Git 基线并执行测试，物理断言新测试在未修复代码上必须报错失败，随后自动还原业务代码再次校验变绿，实现物理级 TDD 反向证伪。 |
 
 ---
 
@@ -116,6 +117,7 @@ k0maru-verifier \
 | `baseline` | — | 自动开启防篡改模式，强制检查现有测试断言是否被删减。 | `k0maru-verifier baseline --base-branch main` |
 | `diff` | — | 聚焦工作区修改范围与白名单校验，输出精简 Diff 统计。 | `k0maru-verifier diff --whitelist "src/**"` |
 | `diff-coverage` | — | 针对 LCOV 或 JSON 覆盖率报告评估增量覆盖率并实施阈值硬门禁。 | `k0maru-verifier diff-coverage --min-diff-coverage 80.0` |
+| `red-check` | — | 波普尔式物理反向证伪：断言新测试在基线未修复代码上必须报错失败。 | `k0maru-verifier red-check` |
 
 ### 3. ReviewPack 审查载荷生成 (Phase 3)
 
@@ -167,7 +169,25 @@ k0maru-verifier diff-coverage --coverage-file coverage/lcov.info --min-diff-cove
 k0maru-verifier --flaky-retry 2
 ```
 
-### 6. CLI 参数完整速查
+### 6. 波普尔式物理反向证伪 (`--red-check` / Phase 5)
+
+彻底根除 AI 智能体编造的“假绿”测试（如空测试体、恒真断言或过度 Mock 导致的脱靶通过）。
+
+依托内存级 RAII `FileBackupGuard` 物理机制：
+1. 自动备份当前受修改的业务生产代码（自动过滤 `target/`、`node_modules/` 等构建副产物）；
+2. 瞬态将业务代码安全回滚至未修改的 Git 基线（`git show HEAD:<file>`）；
+3. 在基线代码上执行新编写的测试套件 —— **物理断言测试必须报错失败（红色 Red）**；
+4. Guard 在生命周期结束时自动安全还原业务代码，重新执行测试并确认变绿（Green）。
+
+```bash
+# 独立执行波普尔反向证伪
+k0maru-verifier red-check
+
+# 作为标准验证流水线的一环执行
+k0maru-verifier verify --red-check
+```
+
+### 7. CLI 参数完整速查
 
 ```text
 Usage: k0maru-verifier [OPTIONS] [COMMAND]
@@ -178,6 +198,7 @@ Commands:
   baseline       Verify workspace quality gates enforcing immutable test baseline protection
   diff           Verify workspace quality gates with scope guard and diff inspection
   diff-coverage  Evaluate diff coverage against coverage report and enforce threshold
+  red-check      Popperian physical falsification: asserts new tests fail on baseline code
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -194,6 +215,7 @@ Options:
       --min-diff-coverage <PCT>        强制要求 Git Diff 新增代码行满足最低覆盖率百分比
       --coverage-file <PATH>           指定覆盖率报告文件路径 (LCOV 或 JSON，缺省时自动扫描)
       --flaky-retry <N>                脆弱测试最大重试次数 (遇失败在上限内重试，成功即标记隔离)
+      --red-check                      波普尔式物理反向证伪：断言新测试在基线代码上必须报错失败
   -h, --help                           打印帮助信息
   -V, --version                        打印版本号
 ```
