@@ -96,6 +96,22 @@ pub struct VerifyArgs {
     /// Maximum retry attempts for transient flaky test failures
     #[arg(long, default_value = "0")]
     pub flaky_retry: usize,
+
+    /// K-DSL verification directive expression (e.g. !Σ:VERIFY(COMPILE,TEST,SCOPE,LIVING_ADR#SEC-004))
+    #[arg(long)]
+    pub kdsl: Option<String>,
+
+    /// Target domain for Linda tuple emission (defaults to VERIFIER)
+    #[arg(long)]
+    pub domain: Option<String>,
+
+    /// Override directory for Linda tuple space (defaults to ~/.k0maru/tuples)
+    #[arg(long)]
+    pub tuple_dir: Option<PathBuf>,
+
+    /// Disable Linda tuple emission upon verification completion
+    #[arg(long)]
+    pub no_tuple: bool,
 }
 
 impl Eq for VerifyArgs {}
@@ -114,6 +130,10 @@ impl PartialEq for VerifyArgs {
             && self.review_pack == other.review_pack
             && self.coverage_file == other.coverage_file
             && self.flaky_retry == other.flaky_retry
+            && self.kdsl == other.kdsl
+            && self.domain == other.domain
+            && self.tuple_dir == other.tuple_dir
+            && self.no_tuple == other.no_tuple
             && match (self.min_diff_coverage, other.min_diff_coverage) {
                 (Some(a), Some(b)) => (a - b).abs() < 1e-6 || a.to_bits() == b.to_bits(),
                 (None, None) => true,
@@ -163,6 +183,16 @@ impl VerifyArgs {
         if self.flaky_retry == 0 {
             self.flaky_retry = fallback.flaky_retry;
         }
+        if self.kdsl.is_none() {
+            self.kdsl = fallback.kdsl;
+        }
+        if self.domain.is_none() {
+            self.domain = fallback.domain;
+        }
+        if self.tuple_dir.is_none() {
+            self.tuple_dir = fallback.tuple_dir;
+        }
+        self.no_tuple = self.no_tuple || fallback.no_tuple;
         self
     }
 }
@@ -200,6 +230,8 @@ pub struct TaskSpec {
     pub min_diff_coverage: Option<f64>,
     pub coverage_file: Option<String>,
     pub flaky_retry: Option<usize>,
+    pub kdsl: Option<String>,
+    pub domain: Option<String>,
 }
 
 /// Merges command-line arguments with an optional specification file.
@@ -254,12 +286,38 @@ pub fn merge_args_with_spec(args: &VerifyArgs) -> Result<VerifierConfig, i32> {
         .clone()
         .or_else(|| spec.as_ref().and_then(|s| s.runner.clone()));
 
+    let raw_kdsl = args
+        .kdsl
+        .clone()
+        .or_else(|| spec.as_ref().and_then(|s| s.kdsl.clone()));
+
+    let kdsl_clause = if let Some(ref expr) = raw_kdsl {
+        match k0maru_verifier::KdslVerifyClause::parse(expr) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("❌ Failed to parse K-DSL expression '{expr}': {e}");
+                return Err(k0maru_verifier::constants::EXIT_FATAL_ERROR);
+            }
+        }
+    } else {
+        None
+    };
+
     let base_branch = args
         .base_branch
         .clone()
+        .or_else(|| {
+            kdsl_clause
+                .as_ref()
+                .and_then(|k| k.immutable_base_branch().map(|b| b.to_string()))
+        })
         .or_else(|| spec.as_ref().and_then(|s| s.base_branch.clone()));
 
     let immutable_tests = args.immutable_tests
+        || kdsl_clause
+            .as_ref()
+            .map(|k| k.has_immutable_tests())
+            .unwrap_or(false)
         || spec
             .as_ref()
             .and_then(|s| s.immutable_tests)
@@ -288,6 +346,7 @@ pub fn merge_args_with_spec(args: &VerifyArgs) -> Result<VerifierConfig, i32> {
         .min_diff_coverage(min_diff_coverage)
         .coverage_file(coverage_file)
         .flaky_retry(flaky_retry)
+        .kdsl(kdsl_clause)
         .auto_detect(true))
 }
 
@@ -482,6 +541,28 @@ async fn main() -> ExitCode {
         return ExitCode::from(k0maru_verifier::constants::EXIT_FATAL_ERROR as u8);
     }
 
+    let mut emitted_tuple_info = None;
+    if !args.no_tuple {
+        let domain_str = args
+            .domain
+            .as_deref()
+            .or_else(|| config.kdsl.as_ref().and_then(|k| k.domain.as_deref()));
+
+        match k0maru_verifier::TupleEmitter::emit_verification_outcome(
+            args.tuple_dir.as_deref(),
+            domain_str,
+            &receipt,
+            &target_receipt_path,
+        ) {
+            Ok(tuple) => {
+                emitted_tuple_info = Some((tuple.id, tuple.kind));
+            }
+            Err(e) => {
+                eprintln!("⚠️  Failed to emit Linda tuple: {e}");
+            }
+        }
+    }
+
     if args.review_pack && receipt.verdict == VerdictStatus::Success {
         let review_pack = match k0maru_verifier::ReviewPack::generate(
             receipt.clone(),
@@ -508,6 +589,9 @@ async fn main() -> ExitCode {
         } else {
             println!("{}", review_pack.markdown_summary);
             println!("📜 Receipt written to {}", target_receipt_path.display());
+            if let Some((ref tuple_id, ref tuple_kind)) = emitted_tuple_info {
+                println!("📦 Linda Tuple emitted: {tuple_id} ({tuple_kind})");
+            }
         }
     } else {
         if args.json {
@@ -515,6 +599,9 @@ async fn main() -> ExitCode {
         } else {
             println!("{}", format_pretty_summary(&receipt));
             println!("📜 Receipt written to {}", target_receipt_path.display());
+            if let Some((ref tuple_id, ref tuple_kind)) = emitted_tuple_info {
+                println!("📦 Linda Tuple emitted: {tuple_id} ({tuple_kind})");
+            }
         }
     }
 
@@ -674,6 +761,34 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_kdsl_and_tuple_args_parsing() {
+        let args = vec![
+            "k0maru-verifier",
+            "--workspace",
+            "/tmp/demo-kdsl",
+            "--kdsl",
+            "!Σ:VERIFY(COMPILE,TEST,SCOPE,LIVING_ADR#SEC-004)",
+            "--domain",
+            "AUTH-SRV",
+            "--tuple-dir",
+            "/tmp/custom-tuples",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse kdsl and tuple args");
+        let resolved = cli.resolve();
+        assert_eq!(resolved.workspace, PathBuf::from("/tmp/demo-kdsl"));
+        assert_eq!(
+            resolved.kdsl.as_deref(),
+            Some("!Σ:VERIFY(COMPILE,TEST,SCOPE,LIVING_ADR#SEC-004)")
+        );
+        assert_eq!(resolved.domain.as_deref(), Some("AUTH-SRV"));
+        assert_eq!(
+            resolved.tuple_dir,
+            Some(PathBuf::from("/tmp/custom-tuples"))
+        );
+        assert!(!resolved.no_tuple);
+    }
+
+    #[test]
     fn test_verify_args_merge_fallback() {
         let root = VerifyArgs {
             workspace: PathBuf::from("/tmp/root-ws"),
@@ -689,6 +804,10 @@ mod tests {
             min_diff_coverage: Some(85.0),
             coverage_file: Some(PathBuf::from("lcov.info")),
             flaky_retry: 2,
+            kdsl: Some("!Σ:VERIFY(COMPILE,TEST)".to_string()),
+            domain: Some("TEST-DOM".to_string()),
+            tuple_dir: Some(PathBuf::from("/tmp/tuples")),
+            no_tuple: true,
         };
 
         // When sub is default, all values fall back to root
@@ -707,6 +826,10 @@ mod tests {
         assert_eq!(merged.min_diff_coverage, Some(85.0));
         assert_eq!(merged.coverage_file, Some(PathBuf::from("lcov.info")));
         assert_eq!(merged.flaky_retry, 2);
+        assert_eq!(merged.kdsl.as_deref(), Some("!Σ:VERIFY(COMPILE,TEST)"));
+        assert_eq!(merged.domain.as_deref(), Some("TEST-DOM"));
+        assert_eq!(merged.tuple_dir, Some(PathBuf::from("/tmp/tuples")));
+        assert!(merged.no_tuple);
 
         // When sub provides explicit values, they take precedence
         let sub_explicit = VerifyArgs {
@@ -714,6 +837,7 @@ mod tests {
             task_id: Some("sub-task".to_string()),
             json: false,
             min_diff_coverage: Some(90.0),
+            kdsl: Some("!Σ:VERIFY(SCOPE)".to_string()),
             ..Default::default()
         };
         let merged_explicit = sub_explicit.merge_fallback(root);
@@ -729,6 +853,9 @@ mod tests {
             merged_explicit.coverage_file,
             Some(PathBuf::from("lcov.info"))
         );
+        assert_eq!(merged_explicit.kdsl.as_deref(), Some("!Σ:VERIFY(SCOPE)"));
+        assert_eq!(merged_explicit.domain.as_deref(), Some("TEST-DOM"));
+        assert!(merged_explicit.no_tuple);
         assert_eq!(merged_explicit.flaky_retry, 2);
     }
 

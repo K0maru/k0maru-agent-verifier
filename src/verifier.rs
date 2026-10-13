@@ -32,6 +32,8 @@ pub struct VerifierConfig {
     pub coverage_file: Option<PathBuf>,
     /// Maximum retry attempts for transient flaky test failures.
     pub flaky_retry: usize,
+    /// Optional K-DSL dynamic verification directive clause.
+    pub kdsl: Option<crate::kdsl::KdslVerifyClause>,
 }
 
 impl VerifierConfig {
@@ -48,6 +50,7 @@ impl VerifierConfig {
             min_diff_coverage: None,
             coverage_file: None,
             flaky_retry: 0,
+            kdsl: None,
         }
     }
 
@@ -110,6 +113,12 @@ impl VerifierConfig {
         self.flaky_retry = retries;
         self
     }
+
+    /// Sets the parsed K-DSL verification directive clause.
+    pub fn kdsl(mut self, kdsl: impl Into<Option<crate::kdsl::KdslVerifyClause>>) -> Self {
+        self.kdsl = kdsl.into();
+        self
+    }
 }
 
 impl Default for VerifierConfig {
@@ -125,6 +134,7 @@ impl Default for VerifierConfig {
             min_diff_coverage: None,
             coverage_file: None,
             flaky_retry: 0,
+            kdsl: None,
         }
     }
 }
@@ -263,12 +273,23 @@ impl WorkspaceVerifier {
             }
         };
 
+        let immutable_tests = config.immutable_tests
+            || config
+                .kdsl
+                .as_ref()
+                .map(|k| k.has_immutable_tests())
+                .unwrap_or(false);
+        let base_branch = config
+            .base_branch
+            .as_deref()
+            .or_else(|| config.kdsl.as_ref().and_then(|k| k.immutable_base_branch()));
+
         // 5. Scope Guard check
         let scope_guard = match ScopeGuard::check_scope_extended(
             &workspace,
             config.whitelist.as_deref(),
-            config.base_branch.as_deref(),
-            config.immutable_tests,
+            base_branch,
+            immutable_tests,
         )
         .await
         {

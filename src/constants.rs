@@ -26,3 +26,10 @@ pub const DEFAULT_BASE_BRANCH_DEV: &str = "dev";
 /// Invariant anti-tampering failure message.
 pub const ANTI_TAMPERING_VIOLATION_MESSAGE: &str =
     "Anti-tampering violation: deletions detected in existing test baseline";
+
+/// Linda tuple space environment variable and subdirectories.
+pub const ENV_K0MARU_TUPLE_DIR: &str = "K0MARU_TUPLE_DIR";
+pub const DEFAULT_TUPLES_SUBDIR: &str = "tuples";
+pub const DEFAULT_TUPLE_DOMAIN: &str = "VERIFIER";
+pub const TUPLE_KIND_VERIFIED: &str = "TASK_VERIFIED";
+pub const TUPLE_KIND_BLOCKED: &str = "TASK_BLOCKED";
