@@ -229,6 +229,115 @@ pub async fn collect_red_check_diff_files(
     Ok(files.into_iter().collect())
 }
 
+/// Inspects the source content of a test file for blatant tautologies (e.g., `assert!(true)`)
+/// and hollow test definitions lacking any verification assertions.
+pub fn inspect_test_file_assertions(content: &str) -> Result<(), String> {
+    let mut non_comment_lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("//") || trimmed.starts_with('#') && !trimmed.starts_with("#[") {
+            continue;
+        }
+        // Strip inline `//` comments for cleaner token matching
+        let code_part = match trimmed.find("//") {
+            Some(idx) => trimmed[..idx].trim(),
+            None => trimmed,
+        };
+        if !code_part.is_empty() {
+            non_comment_lines.push(code_part);
+        }
+    }
+
+    let joined = non_comment_lines.join("\n");
+    let compact: String = joined.chars().filter(|c| !c.is_whitespace()).collect();
+
+    // 1. Detect blatant tautological assertions
+    let compact_tautologies = [
+        "assert!(true)",
+        "assert_eq!(true,true)",
+        "assert_eq!(false,false)",
+        "assert_eq!(1,1)",
+        "assert_eq!(0,0)",
+        "expect(true).toBe(true)",
+        "expect(1).toBe(1)",
+    ];
+
+    for pat in compact_tautologies {
+        if compact.contains(pat) {
+            return Err(format!(
+                "Tautological assertion detected (e.g. {pat}) in test file"
+            ));
+        }
+    }
+
+    for line in &non_comment_lines {
+        let trimmed = line.trim();
+        if trimmed == "assert True"
+            || trimmed.starts_with("assert True ")
+            || trimmed.starts_with("assert True;")
+            || trimmed.starts_with("assert True,")
+            || trimmed == "assert(True)"
+        {
+            return Err(
+                "Tautological assertion detected (e.g. assert True) in test file".to_string(),
+            );
+        }
+    }
+
+    // 2. Check if the file defines at least one test function/case
+    let defines_test = joined.contains("#[test]")
+        || joined.contains("#[tokio::test")
+        || joined.contains("def test_")
+        || joined.contains("it(")
+        || joined.contains("test(");
+
+    if defines_test {
+        let assertion_markers = [
+            "assert!",
+            "assert_eq!",
+            "assert_ne!",
+            "assert_matches!",
+            "matches!",
+            "should_panic",
+            "panic!",
+            "expect(",
+            ".expect(",
+            "assert ",
+            "pytest.raises",
+            ".unwrap()",
+            "?;",
+        ];
+
+        let has_assertion = assertion_markers.iter().any(|m| joined.contains(m));
+        if !has_assertion {
+            return Err(
+                "Hollow test detected: test file contains no assertions or verification checks"
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates that all modified/added test files in the workspace are neither hollow nor tautological.
+pub fn validate_test_files_not_hollow(
+    workspace: &Path,
+    test_files: &[String],
+) -> Result<(), String> {
+    for rel_path in test_files {
+        let full_path = workspace.join(rel_path);
+        if !full_path.is_file() {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(&full_path) {
+            inspect_test_file_assertions(&content)
+                .map_err(|reason| format!("{reason} in '{rel_path}'"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Executes Popperian physical falsification on the workspace.
 pub async fn run_red_check(
     workspace: &Path,
@@ -281,6 +390,18 @@ pub async fn run_red_check(
         });
     }
 
+    // Step A: Pre-reversion static audit against hollow or tautological tests
+    if let Err(reason) = validate_test_files_not_hollow(workspace, &test_files) {
+        return Ok(RedCheckResult {
+            status: StepStatus::Failed,
+            baseline_ref: Some(baseline),
+            test_files,
+            prod_files,
+            exit_code: Some(1),
+            message: Some(format!("Popperian falsification failed: {reason}")),
+        });
+    }
+
     // Safe RAII backup guard for all modified production files
     let mut guard = FileBackupGuard::new(workspace);
     for file in &prod_files {
@@ -312,6 +433,24 @@ pub async fn run_red_check(
         }
     }
 
+    // Step B: First check compilation against the reverted baseline
+    let compile_res = runner.check(workspace).await;
+    if let Ok(c) = compile_res {
+        if !c.is_passed() {
+            guard.restore();
+            return Ok(RedCheckResult {
+                status: StepStatus::Passed,
+                baseline_ref: Some(baseline.clone()),
+                test_files,
+                prod_files,
+                exit_code: Some(c.exit_code),
+                message: Some(format!(
+                    "Popperian falsification confirmed (baseline compile-time falsification: new tests reference new symbols absent in '{baseline}' and pass non-hollow assertion audit)"
+                )),
+            });
+        }
+    }
+
     // Run test runner against baseline code with new tests
     let test_res = runner.test(workspace).await;
 
@@ -330,7 +469,7 @@ pub async fn run_red_check(
                     prod_files,
                     exit_code: Some(exit_code),
                     message: Some(format!(
-                        "Popperian falsification confirmed: tests correctly failed on unmodified baseline '{baseline}' (exit code: {exit_code}, failed tests: {})",
+                        "Popperian falsification confirmed (runtime assertion falsification: tests compiled on baseline '{baseline}' and failed at runtime as expected, exit code: {exit_code}, failed tests: {})",
                         t.failed
                     )),
                 })
@@ -343,7 +482,7 @@ pub async fn run_red_check(
                     prod_files,
                     exit_code: t.exit_code,
                     message: Some(format!(
-                        "Popperian falsification failed: tests passed against unmodified baseline '{baseline}' without production changes (fake green test detected)"
+                        "Popperian falsification failed: tests compiled and passed against unmodified baseline '{baseline}' without production changes (fake green test detected)"
                     )),
                 })
             }
@@ -361,5 +500,58 @@ pub async fn run_red_check(
                 )),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inspect_test_file_assertions_rejects_tautologies() {
+        let rust_taut = r#"
+            #[test]
+            fn fake() {
+                assert!(true);
+            }
+        "#;
+        assert!(inspect_test_file_assertions(rust_taut).is_err());
+
+        let rust_eq_taut = r#"
+            #[test]
+            fn fake_eq() {
+                assert_eq!(1, 1);
+            }
+        "#;
+        assert!(inspect_test_file_assertions(rust_eq_taut).is_err());
+
+        let py_taut = "def test_foo():\n    assert True\n";
+        assert!(inspect_test_file_assertions(py_taut).is_err());
+
+        let js_taut = "test('fake', () => { expect(true).toBe(true); });";
+        assert!(inspect_test_file_assertions(js_taut).is_err());
+    }
+
+    #[test]
+    fn test_inspect_test_file_assertions_rejects_hollow_tests() {
+        let hollow = r#"
+            #[test]
+            fn test_nothing() {
+                let _ = 1 + 2;
+            }
+        "#;
+        let err = inspect_test_file_assertions(hollow).unwrap_err();
+        assert!(err.contains("Hollow test detected"));
+    }
+
+    #[test]
+    fn test_inspect_test_file_assertions_accepts_genuine_tests() {
+        let valid = r#"
+            #[test]
+            fn test_real() {
+                assert_eq!(compute(2, 3), 5);
+            }
+        "#;
+        assert!(inspect_test_file_assertions(valid).is_ok());
     }
 }
