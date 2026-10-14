@@ -171,13 +171,14 @@ k0maru-verifier --flaky-retry 2
 
 ### 6. 波普尔式物理反向证伪 (`--red-check` / Phase 5)
 
-彻底根除 AI 智能体编造的“假绿”测试（如空测试体、恒真断言或过度 Mock 导致的脱靶通过）。
+彻底根除 AI 智能体编造的“假绿”测试（如空测试体、恒真断言、过度 Mock 或利用新增符号编译报错伪装红灯通过）。
 
-依托内存级 RAII `FileBackupGuard` 物理机制：
-1. 自动备份当前受修改的业务生产代码（自动过滤 `target/`、`node_modules/` 等构建副产物）；
-2. 瞬态将业务代码安全回滚至未修改的 Git 基线（`git show HEAD:<file>`）；
-3. 在基线代码上执行新编写的测试套件 —— **物理断言测试必须报错失败（红色 Red）**；
-4. Guard 在生命周期结束时自动安全还原业务代码，重新执行测试并确认变绿（Green）。
+依托两阶段验证协议与内存级 RAII `FileBackupGuard` 物理机制：
+1. **阶段 A（回滚前静态恒真与空心断言审计）**：自动剥离注释并扫描新增/修改的测试文件，直接拦截明显恒真断言（`assert!(true)`、`assert_eq!(true, true)`、`assert_eq!(1, 1)`、`assert True`、`expect(true).toBe(true)`）或缺失任何校验逻辑的空心测试函数 —— 彻底封堵“仅调用新函数再配 `assert!(true)` 从而借基线编译报错蒙混过关”的漏洞；
+2. **阶段 B（RAII 基线回滚与编译期/运行期双重证伪区分）**：
+   - 自动备份当前受修改的业务生产代码（过滤 `target/`、`node_modules/` 等构建副产物）并瞬态回滚至 Git 基线（`git show HEAD:<file>`）；
+   - 先在回滚后的基线上运行 `runner.check(workspace)`，精准区分 **基线新符号编译期证伪（已通过非空心断言审计）** 与 **运行期断言失败证伪（`runner.test(workspace)` 在旧基线上编译通过且断言报错）**；
+   - Guard 在生命周期结束时自动安全还原业务代码，重新执行测试并确认变绿（Green）。
 
 ```bash
 # 独立执行波普尔反向证伪
