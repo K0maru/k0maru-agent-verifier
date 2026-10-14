@@ -318,3 +318,150 @@ fn test_bar() {
     assert_eq!(sub_val["verdict"], "success");
     assert_eq!(sub_val["checks"]["red_check"]["status"], "passed");
 }
+
+#[tokio::test]
+async fn test_red_check_rejects_compile_error_masquerade_with_tautological_assert_true() {
+    let temp = TempDir::new().unwrap();
+    let ws = temp.path();
+    init_git_repo(ws);
+
+    fs::write(
+        ws.join("Cargo.toml"),
+        r#"[package]
+name = "dummy-masquerade"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .unwrap();
+
+    fs::create_dir_all(ws.join("src")).unwrap();
+    fs::write(
+        ws.join("src/lib.rs"),
+        r#"pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+"#,
+    )
+    .unwrap();
+
+    run_git(ws, &["add", "."]);
+    run_git(ws, &["commit", "-m", "initial baseline"]);
+
+    // Agent adds a new function `new_calc` in src/lib.rs, and writes a tautological test
+    // that references `new_calc` (so baseline fails to compile) but only asserts `assert!(true)`.
+    fs::write(
+        ws.join("src/lib.rs"),
+        r#"pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+pub fn new_calc() -> i32 {
+    42
+}
+"#,
+    )
+    .unwrap();
+
+    fs::create_dir_all(ws.join("tests")).unwrap();
+    fs::write(
+        ws.join("tests/fake_test.rs"),
+        r#"#[test]
+fn test_fake() {
+    let _ = dummy_masquerade::new_calc();
+    assert!(true);
+}
+"#,
+    )
+    .unwrap();
+
+    let verifier = WorkspaceVerifier::new();
+    let config = VerifierConfig::new(ws, "TASK-MASQUERADE")
+        .red_check(true)
+        .auto_detect(true);
+
+    let receipt = verifier
+        .verify(&config)
+        .await
+        .expect("verification receipt generated");
+
+    assert_eq!(receipt.verdict, VerdictStatus::Failed);
+    let red_check = receipt.checks.red_check.expect("red_check present");
+    assert_eq!(red_check.status, StepStatus::Failed);
+    let msg = red_check.message.unwrap();
+    assert!(
+        msg.contains("Tautological assertion detected"),
+        "unexpected red_check message: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_red_check_rejects_hollow_test_without_assertions() {
+    let temp = TempDir::new().unwrap();
+    let ws = temp.path();
+    init_git_repo(ws);
+
+    fs::write(
+        ws.join("Cargo.toml"),
+        r#"[package]
+name = "dummy-hollow"
+version = "0.1.0"
+edition = "2021"
+"#,
+    )
+    .unwrap();
+
+    fs::create_dir_all(ws.join("src")).unwrap();
+    fs::write(
+        ws.join("src/lib.rs"),
+        r#"pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+"#,
+    )
+    .unwrap();
+
+    run_git(ws, &["add", "."]);
+    run_git(ws, &["commit", "-m", "initial baseline"]);
+
+    fs::write(
+        ws.join("src/lib.rs"),
+        r#"pub fn add(a: i32, b: i32) -> i32 {
+    a + b + 0
+}
+"#,
+    )
+    .unwrap();
+
+    fs::create_dir_all(ws.join("tests")).unwrap();
+    fs::write(
+        ws.join("tests/hollow_test.rs"),
+        r#"use dummy_hollow::add;
+
+#[test]
+fn t() {
+    let _ = add(1, 2);
+}
+"#,
+    )
+    .unwrap();
+
+    let verifier = WorkspaceVerifier::new();
+    let config = VerifierConfig::new(ws, "TASK-HOLLOW")
+        .red_check(true)
+        .auto_detect(true);
+
+    let receipt = verifier
+        .verify(&config)
+        .await
+        .expect("verification receipt generated");
+
+    assert_eq!(receipt.verdict, VerdictStatus::Failed);
+    let red_check = receipt.checks.red_check.expect("red_check present");
+    assert_eq!(red_check.status, StepStatus::Failed);
+    let msg = red_check.message.unwrap();
+    assert!(
+        msg.contains("Hollow test detected"),
+        "unexpected red_check message: {msg}"
+    );
+}
